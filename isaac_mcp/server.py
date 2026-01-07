@@ -445,6 +445,63 @@ simulation_context.stop()
     except Exception as e:
         logger.error(f"Error executing code: {str(e)}")
         return f"Error executing code: {str(e)}"
+
+
+@mcp.tool()
+def execute_script_file(ctx: Context, file_path: str, variables: str = None) -> str:
+    """
+    Execute a Python script file in Isaac Sim. The script file should be a .py file
+    that can be executed in the Isaac Sim Python environment.
+    
+    This is useful for running pre-written scripts from the isaac-tools repository
+    or other locations without having to paste the entire code.
+    
+    Parameters:
+    - file_path: Absolute path to the Python script file to execute
+    - variables: Optional JSON string of variables to inject into the script namespace
+                 e.g. '{"robot_name": "franka", "position": [0, 0, 0]}'
+    
+    Example:
+        execute_script_file("D:/github/isaac-tools/scripts/inspect_stage.py")
+        execute_script_file("D:/github/isaac-tools/scripts/spawn_robot.py", '{"robot_type": "franka"}')
+    """
+    try:
+        # Read the script file
+        script_path = Path(file_path)
+        if not script_path.exists():
+            return f"Error: Script file not found: {file_path}"
+        
+        if not script_path.suffix == '.py':
+            return f"Error: File must be a .py file: {file_path}"
+        
+        code = script_path.read_text(encoding='utf-8')
+        
+        # If variables are provided, prepend them to the script
+        if variables:
+            try:
+                import json as json_module
+                vars_dict = json_module.loads(variables)
+                var_lines = []
+                for key, value in vars_dict.items():
+                    if isinstance(value, str):
+                        var_lines.append(f'{key} = "{value}"')
+                    else:
+                        var_lines.append(f'{key} = {value}')
+                vars_code = '\n'.join(var_lines) + '\n\n'
+                code = vars_code + code
+            except json.JSONDecodeError as e:
+                return f"Error parsing variables JSON: {str(e)}"
+        
+        # Get the global connection
+        isaac = get_isaac_connection()
+        logger.info(f"Executing script file: {file_path}")
+        
+        result = isaac.send_command("execute_script", {"code": code})
+        return f"Script file executed: {file_path}\nResult: {result}"
+    except Exception as e:
+        logger.error(f"Error executing script file: {str(e)}")
+        return f"Error executing script file: {str(e)}"
+
                 
 @mcp.prompt()
 def asset_creation_strategy() -> str:
