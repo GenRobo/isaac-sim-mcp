@@ -269,8 +269,7 @@ def get_scene_info(ctx: Context) -> str:
         # return result
     except Exception as e:
         logger.error(f"Error getting scene info from Isaac: {str(e)}")
-        # return f"Error getting scene info: {str(e)}"
-        return {"status": "error", "error": str(e), "message": "Error getting scene info"}
+        return f"Error getting scene info: {str(e)}"
 
 @mcp.tool()
 def list_robots(ctx: Context) -> str:
@@ -589,8 +588,7 @@ def create_physics_scene(
         return f"create_physics_scene successfully: {result.get('result', '')}, {result.get('message', '')}"
     except Exception as e:
         logger.error(f"Error create_physics_scene: {str(e)}")
-        # return f"Error create_physics_scene: {str(e)}"
-        return {"status": "error", "error": str(e), "message": "Error create_physics_scene"}
+        return f"Error create_physics_scene: {str(e)}"
     
 @mcp.tool("create_robot")
 def create_robot(robot_type: str = "g1", position: List[float] = [0, 0, 0]) -> str:
@@ -633,8 +631,7 @@ def omni_kit_command(command: str = "CreatePrim", prim_type: str = "Sphere") -> 
         return f"Omni Kit command executed successfully: {result.get('message', '')}"
     except Exception as e:
         logger.error(f"Error executing Omni Kit command: {str(e)}")
-        # return f"Error executing Omni Kit command: {str(e)}"
-        return {"status": "error", "error": str(e), "message": "Error executing Omni Kit command"}
+        return f"Error executing Omni Kit command: {str(e)}"
 
 
 @mcp.tool()
