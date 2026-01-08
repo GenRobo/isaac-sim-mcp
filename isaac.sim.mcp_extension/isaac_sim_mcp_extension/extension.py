@@ -332,9 +332,16 @@ class MCPExtension(omni.ext.IExt):
             code: The Python script to execute.
             
         Returns:
-            Dictionary with execution result.
+            Dictionary with execution result and captured stdout.
         """
+        import io
+        import sys
+        
         try:
+            # Capture stdout
+            old_stdout = sys.stdout
+            sys.stdout = captured_output = io.StringIO()
+            
             # Create a local namespace
             local_ns = {}
             
@@ -345,22 +352,26 @@ class MCPExtension(omni.ext.IExt):
             local_ns["UsdGeom"] = UsdGeom
             local_ns["Sdf"] = Sdf
             local_ns["Gf"] = Gf
-            # code = script["code"]
             
             # Execute the script
-            exec(code,  local_ns)
+            exec(code, local_ns)
             
-            # Get the result if any
-            # result = local_ns.get("result", None)
-            result = None
+            # Get captured output
+            output = captured_output.getvalue()
+            sys.stdout = old_stdout
             
+            # Get the result if set in script
+            result = local_ns.get("result", None)
             
             return {
                 "status": "success",
                 "message": "Script executed successfully",
-                "result": result
+                "result": result,
+                "output": output
             }
         except Exception as e:
+            # Restore stdout on error
+            sys.stdout = old_stdout if 'old_stdout' in dir() else sys.stdout
             carb.log_error(f"Error executing script: {e}")
             import traceback
             carb.log_error(traceback.format_exc())
