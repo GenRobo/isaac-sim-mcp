@@ -10,13 +10,15 @@ The MCP Server and its extension leverage the Model Context Protocol (MCP) frame
 - Physics scene creation and management
 - Log capture for debugging
 - Dynamic robot positioning and movement
-- Custom lighting and scene creation
+- Execute Python scripts directly in Isaac Sim
 
 ## Requirements
 
-- NVIDIA Isaac Sim 4.2.0+ or **Isaac Sim 5.x** (tested with 5.1)
+- **NVIDIA Isaac Sim 5.x** (tested with 5.1) or Isaac Sim 4.2.0+
 - Python 3.10+
 - Cursor AI editor for MCP integration
+
+---
 
 ## Quick Start (Windows)
 
@@ -24,26 +26,33 @@ The MCP Server and its extension leverage the Model Context Protocol (MCP) frame
 
 ```powershell
 cd D:\github
-git clone https://github.com/omni-mcp/isaac-sim-mcp
+git clone https://github.com/GenRobo/isaac-sim-mcp.git
+cd isaac-sim-mcp
 ```
 
 ### 2. Launch Isaac Sim with MCP Extension
 
-Use the provided launch script:
+**Option A: Use the launch script (recommended)**
+
+Edit `launch_isaac_mcp.bat` to set your Isaac Sim path, then run:
 
 ```powershell
-# Edit launch_isaac_mcp.bat to set your Isaac Sim path first
-D:\github\isaac-sim-mcp\launch_isaac_mcp.bat
+.\launch_isaac_mcp.bat
 ```
 
-Or manually:
+**Option B: Manual launch**
 
 ```powershell
+# For Isaac Sim 5.x built from source:
 cd D:\github\IsaacSim\_build\windows-x86_64\release
+.\isaac-sim.bat --ext-folder D:\github\isaac-sim-mcp --enable isaac.sim.mcp_extension
+
+# For Isaac Sim installed via Omniverse Launcher:
+cd C:\Users\%USERNAME%\AppData\Local\ov\pkg\isaac-sim-5.1.0
 .\isaac-sim.bat --ext-folder D:\github\isaac-sim-mcp --enable isaac.sim.mcp_extension
 ```
 
-Verify the extension starts - you should see:
+**Verify** - You should see in the Isaac Sim console:
 ```
 Isaac Sim MCP server started on localhost:8766
 ```
@@ -61,7 +70,7 @@ pip install "mcp[cli]"
 
 ### 4. Configure Cursor
 
-Add to your Cursor MCP settings (`%USERPROFILE%\.cursor\mcp.json`):
+Add to your Cursor MCP settings file at `%USERPROFILE%\.cursor\mcp.json`:
 
 ```json
 {
@@ -74,44 +83,69 @@ Add to your Cursor MCP settings (`%USERPROFILE%\.cursor\mcp.json`):
 }
 ```
 
-Restart Cursor and verify the `isaac-sim` MCP server appears in the MCP panel.
+**Restart Cursor** and verify the `isaac-sim` MCP server appears in the MCP panel (click the MCP icon in the sidebar).
 
 ---
 
 ## Quick Start (Linux)
 
-### 1. Clone and Setup
+### 1. Clone the Repository
 
 ```bash
 cd ~/Documents
-git clone https://github.com/omni-mcp/isaac-sim-mcp
+git clone https://github.com/GenRobo/isaac-sim-mcp.git
+cd isaac-sim-mcp
 ```
 
-### 2. Launch Isaac Sim
+### 2. Launch Isaac Sim with MCP Extension
+
+**Option A: Use the launch script (recommended)**
 
 ```bash
-# Set environment variables for 3D generation (optional)
-export BEAVER3D_MODEL=<your beaver3d model name>
-export ARK_API_KEY=<Your Beaver3D API Key>
-export NVIDIA_API_KEY="<your nvidia api key>"
+# Set your Isaac Sim path (or edit launch_isaac_mcp.sh)
+export ISAAC_SIM_ROOT=~/.local/share/ov/pkg/isaac-sim-5.1.0
 
-# Launch Isaac Sim with extension
-cd ~/.local/share/ov/pkg/isaac-sim-4.2.0
-./isaac-sim.sh --ext-folder ~/Documents/isaac-sim-mcp/ --enable isaac.sim.mcp_extension
+./launch_isaac_mcp.sh
 ```
 
-### 3. Configure Cursor MCP
+**Option B: Manual launch**
+
+```bash
+# For Isaac Sim 5.x:
+cd ~/.local/share/ov/pkg/isaac-sim-5.1.0
+./isaac-sim.sh --ext-folder ~/Documents/isaac-sim-mcp --enable isaac.sim.mcp_extension
+```
+
+**Verify** - You should see:
+```
+Isaac Sim MCP server started on localhost:8766
+```
+
+### 3. Setup MCP Server for Cursor
+
+```bash
+cd ~/Documents/isaac-sim-mcp
+python3 -m venv .venv
+source .venv/bin/activate
+pip install "mcp[cli]"
+```
+
+### 4. Configure Cursor
+
+Add to `~/.cursor/mcp.json`:
 
 ```json
 {
     "mcpServers": {
         "isaac-sim": {
-            "command": "uv",
-            "args": ["run", "~/Documents/isaac-sim-mcp/isaac_mcp/server.py"]
+            "command": "/home/YOUR_USERNAME/Documents/isaac-sim-mcp/.venv/bin/python",
+            "args": ["/home/YOUR_USERNAME/Documents/isaac-sim-mcp/isaac_mcp/server.py"]
         }
     }
 }
 ```
+
+Replace `YOUR_USERNAME` with your actual username, or use absolute paths.
 
 ---
 
@@ -155,7 +189,7 @@ cd ~/.local/share/ov/pkg/isaac-sim-4.2.0
 | `execute_script_file` | Execute a .py file from disk |
 | `omni_kit_command` | Execute an Omniverse Kit command |
 
-### 3D Generation (Optional)
+### 3D Generation (Optional - requires API keys)
 
 | Tool | Description |
 |------|-------------|
@@ -192,14 +226,21 @@ Get the articulation info for /World/MyRobot
 Get the joint states for /World/MyRobot
 ```
 
-### Capture Errors
+### Capture Physics Errors
 
 ```
 # Start log capture, run sim, check for errors
 Start capturing logs
-Play the simulation for a few seconds
+Play the simulation for a few seconds  
 Stop the simulation
 Get the captured logs filtered by errors
+```
+
+### Execute Custom Scripts
+
+```
+# Run a fix script from isaac-tools
+Execute the script file D:/github/isaac-tools/scripts/fix_vision60_arm.py
 ```
 
 ---
@@ -207,21 +248,21 @@ Get the captured logs filtered by errors
 ## Architecture
 
 ```
-┌─────────────────┐     Socket      ┌──────────────────────┐
-│   Cursor IDE    │◄──────────────►│   MCP Server         │
-│   (MCP Client)  │   (localhost)   │   (server.py)        │
-└─────────────────┘                 └──────────┬───────────┘
-                                               │
-                                               │ Socket :8766
-                                               ▼
-                                    ┌──────────────────────┐
-                                    │  Isaac Sim Extension │
-                                    │  (extension.py)      │
-                                    │                      │
-                                    │  - Command queue     │
-                                    │  - USD manipulation  │
-                                    │  - Physics control   │
-                                    └──────────────────────┘
+┌─────────────────┐     JSON-RPC     ┌──────────────────────┐
+│   Cursor IDE    │◄────────────────►│   MCP Server         │
+│   (MCP Client)  │                  │   (server.py)        │
+└─────────────────┘                  └──────────┬───────────┘
+                                                │
+                                                │ Socket :8766
+                                                ▼
+                                     ┌──────────────────────┐
+                                     │  Isaac Sim Extension │
+                                     │  (extension.py)      │
+                                     │                      │
+                                     │  - Command queue     │
+                                     │  - USD manipulation  │
+                                     │  - Physics control   │
+                                     └──────────────────────┘
 ```
 
 ---
@@ -230,13 +271,13 @@ Get the captured logs filtered by errors
 
 ### MCP Server Not Responding
 
-1. Check Isaac Sim console for "MCP server started on localhost:8766"
-2. Restart Cursor's MCP connection
+1. Check Isaac Sim console for `"Isaac Sim MCP server started on localhost:8766"`
+2. In Cursor, click the MCP icon and restart the isaac-sim server
 3. Check firewall isn't blocking localhost:8766
 
 ### Commands Timing Out
 
-The extension uses queue-based command processing (one command per frame). Long-running scripts may take time. Check Isaac Sim console for progress.
+The extension uses queue-based command processing (one command per frame). Long-running scripts may take time. Check Isaac Sim console for `[MCP]` log messages.
 
 ### Robot Not Falling / Physics Issues
 
@@ -246,30 +287,23 @@ capture_logs(action="get", filter_level="error")
 ```
 
 Common issues:
-- Missing physics scene (use `create_physics_scene`)
-- Triangle mesh collisions on dynamic bodies
-- World-anchored joints
+- Missing physics scene → use `create_physics_scene`
+- Triangle mesh collisions on dynamic bodies → use convexHull
+- World-anchored joints → check for joints with empty body targets
 
----
+### Extension Not Loading
 
-## Development
-
-### MCP Inspector (Debug Mode)
-
-```bash
-uv run mcp dev ~/Documents/isaac-sim-mcp/isaac_mcp/server.py
-# Visit http://localhost:5173
+Make sure the extension folder path is correct:
 ```
-
-### Extension Development
-
-The extension auto-reloads when you modify `extension.py`. Check Isaac Sim's console for errors.
+--ext-folder "D:\github\isaac-sim-mcp"  # NOT the isaac.sim.mcp_extension subfolder
+--enable isaac.sim.mcp_extension
+```
 
 ---
 
 ## Related Projects
 
-- **[isaac-tools](https://github.com/your-repo/isaac-tools)** - Robot debugging scripts and USD inspection tools
+- **[isaac-tools](https://github.com/GenRobo/isaac-tools)** - Robot debugging scripts and USD inspection tools
 
 ---
 
