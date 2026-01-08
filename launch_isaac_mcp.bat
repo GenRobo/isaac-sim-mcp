@@ -9,7 +9,7 @@ setlocal
 set ISAAC_SIM_ROOT=D:\github\IsaacSim\_build\windows-x86_64\release
 
 :: Path to this MCP extension folder
-set MCP_EXT_FOLDER=%~dp0
+set MCP_EXT_FOLDER=D:\github\isaac-sim-mcp
 :: ---------------------
 
 echo ========================================
@@ -30,7 +30,10 @@ if not exist "%ISAAC_SIM_ROOT%\isaac-sim.bat" (
 
 :: Launch Isaac Sim with MCP extension
 echo Starting Isaac Sim with MCP extension...
+echo Command: isaac-sim.bat --ext-folder "%MCP_EXT_FOLDER%" --enable isaac.sim.mcp_extension
+echo.
+
 cd /d "%ISAAC_SIM_ROOT%"
-call isaac-sim.bat --ext-folder "%MCP_EXT_FOLDER%" --enable isaac.sim.mcp_extension
+isaac-sim.bat --ext-folder "%MCP_EXT_FOLDER%" --enable isaac.sim.mcp_extension
 
 endlocal
