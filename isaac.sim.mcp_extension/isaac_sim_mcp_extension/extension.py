@@ -77,6 +77,9 @@ class MCPExtension(omni.ext.IExt):
         self._settings = carb.settings.get_settings()
         self._image_url_cache = {} # cache for image url
         self._text_prompt_cache = {} # cache for text prompt
+        self._captured_logs = []  # Buffer for captured log messages
+        self._log_capture_enabled = False
+        self._max_log_buffer = 500  # Max logs to keep in buffer
         
 
     def on_startup(self, ext_id: str):
@@ -312,6 +315,7 @@ class MCPExtension(omni.ext.IExt):
             "transform": self.transform,
             "search_3d_usd_by_text": self.search_3d_usd_by_text,
             "simulation_control": self.simulation_control,
+            "capture_logs": self.capture_logs,
         }
         
         handler = handlers.get(cmd_type)
@@ -525,6 +529,120 @@ class MCPExtension(omni.ext.IExt):
             
         except Exception as e:
             return {"status": "error", "message": str(e)}
+    
+    def capture_logs(self, action: str = "get", clear: bool = False, filter_level: str = "all"):
+        """Capture and retrieve Isaac Sim console logs.
+        
+        Args:
+            action: "start" to begin capturing, "stop" to end, "get" to retrieve logs
+            clear: If True, clear the log buffer after returning
+            filter_level: "all", "error", "warning", or "info"
+        
+        Returns:
+            Dictionary with captured logs
+        """
+        try:
+            if action == "start":
+                self._captured_logs = []
+                self._log_capture_enabled = True
+                
+                # Subscribe to carb logging
+                try:
+                    import omni.kit.app
+                    # Use the message bus to capture logs
+                    self._log_subscription = omni.kit.app.get_app().get_message_bus_event_stream().create_subscription_to_pop(
+                        self._on_log_message, name="mcp_log_capture"
+                    )
+                except Exception as sub_err:
+                    # Fallback: just enable manual capture flag
+                    pass
+                
+                return {
+                    "status": "success",
+                    "message": "Log capture started",
+                    "buffer_size": 0
+                }
+                
+            elif action == "stop":
+                self._log_capture_enabled = False
+                if hasattr(self, '_log_subscription'):
+                    self._log_subscription = None
+                return {
+                    "status": "success",
+                    "message": "Log capture stopped",
+                    "buffer_size": len(self._captured_logs)
+                }
+                
+            elif action == "get":
+                # Filter logs by level
+                if filter_level == "all":
+                    logs = self._captured_logs.copy()
+                elif filter_level == "error":
+                    logs = [l for l in self._captured_logs if l.get("level") in ["error", "Error", "ERROR"]]
+                elif filter_level == "warning":
+                    logs = [l for l in self._captured_logs if l.get("level") in ["warning", "Warning", "WARN", "warn", "error", "Error", "ERROR"]]
+                else:
+                    logs = self._captured_logs.copy()
+                
+                if clear:
+                    self._captured_logs = []
+                
+                # Also try to get recent physics errors directly
+                physics_errors = self._get_physics_errors()
+                
+                return {
+                    "status": "success",
+                    "message": f"Retrieved {len(logs)} logs",
+                    "logs": logs[-100:],  # Return last 100 logs
+                    "physics_errors": physics_errors,
+                    "total_captured": len(self._captured_logs)
+                }
+            
+            elif action == "clear":
+                self._captured_logs = []
+                return {
+                    "status": "success",
+                    "message": "Log buffer cleared"
+                }
+                
+            else:
+                return {"status": "error", "message": f"Unknown action: {action}"}
+                
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def _on_log_message(self, event):
+        """Callback for log messages."""
+        if self._log_capture_enabled and len(self._captured_logs) < self._max_log_buffer:
+            try:
+                self._captured_logs.append({
+                    "level": str(event.type),
+                    "message": str(event.payload)
+                })
+            except:
+                pass
+    
+    def _get_physics_errors(self):
+        """Try to get physics-related errors from the simulation."""
+        errors = []
+        try:
+            import omni.physx
+            physx = omni.physx.get_physx_interface()
+            # Check for common physics issues
+            stage = omni.usd.get_context().get_stage()
+            if stage:
+                from pxr import UsdPhysics
+                # Look for articulations with issues
+                for prim in stage.Traverse():
+                    if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                        # Check if articulation has issues
+                        path = str(prim.GetPath())
+                        # Basic validation
+                        if not prim.IsValid():
+                            errors.append(f"Invalid articulation prim: {path}")
+        except Exception as e:
+            errors.append(f"Error checking physics: {str(e)}")
+        return errors
         
     def omini_kit_command(self,  command: str, prim_type: str) -> Dict[str, Any]:
         omni.kit.commands.execute(command, prim_type=prim_type)

@@ -581,6 +581,57 @@ def simulation_control(ctx: Context, action: str = "status", frames: int = 60) -
         return f"Error controlling simulation: {str(e)}"
 
 
+@mcp.tool()
+def capture_logs(ctx: Context, action: str = "get", clear: bool = False, filter_level: str = "all") -> str:
+    """
+    Capture and retrieve Isaac Sim console logs for debugging.
+    
+    Parameters:
+    - action: "start" to begin capturing, "stop" to end, "get" to retrieve, "clear" to empty buffer
+    - clear: If True, clear the log buffer after returning logs
+    - filter_level: "all", "error", "warning", or "info"
+    
+    Workflow:
+    1. capture_logs(action="start") - Begin capturing
+    2. simulation_control(action="play") - Run simulation
+    3. simulation_control(action="stop") - Stop simulation  
+    4. capture_logs(action="get", filter_level="error") - Get errors
+    """
+    try:
+        isaac = get_isaac_connection()
+        result = isaac.send_command("capture_logs", {
+            "action": action,
+            "clear": clear,
+            "filter_level": filter_level
+        })
+        
+        if action == "get":
+            logs = result.get("logs", [])
+            physics_errors = result.get("physics_errors", [])
+            
+            output = f"Logs captured: {len(logs)}\n"
+            
+            if physics_errors:
+                output += f"\nPHYSICS ERRORS ({len(physics_errors)}):\n"
+                for err in physics_errors:
+                    output += f"  - {err}\n"
+            
+            if logs:
+                output += f"\nRECENT LOGS:\n"
+                for log in logs[-20:]:  # Show last 20
+                    level = log.get("level", "?")
+                    msg = log.get("message", "")[:200]  # Truncate long messages
+                    output += f"  [{level}] {msg}\n"
+            
+            return output
+        else:
+            return f"Log capture: {result.get('message', action)}"
+            
+    except Exception as e:
+        logger.error(f"Error with log capture: {str(e)}")
+        return f"Error with log capture: {str(e)}"
+
+
 @mcp.tool("create_physics_scene")
 def create_physics_scene(
     objects: List[Dict[str, Any]] = [],
