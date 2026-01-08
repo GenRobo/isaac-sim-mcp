@@ -22,20 +22,19 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-"""Extension module for Isaac Sim MCP."""
+"""Extension module for Isaac Sim MCP - Refactored for stability."""
 
-import asyncio
 import carb
-# import omni.ext
-# import omni.ui as ui
 import omni.usd
+import omni.kit.app
 import threading
 import time
 import socket
 import json
 import traceback
-
+import queue
 import gc
+
 from pxr import Usd, UsdGeom, Sdf, Gf
 
 import omni
@@ -47,17 +46,16 @@ from omni.isaac.nucleus import get_assets_root_path
 from omni.isaac.core.prims import XFormPrim
 import numpy as np
 from omni.isaac.core import World
+
 # Import Beaver3d and USDLoader
 from isaac_sim_mcp_extension.gen3d import Beaver3d
 from isaac_sim_mcp_extension.usd import USDLoader
 from isaac_sim_mcp_extension.usd import USDSearch3d
-import requests
 
-# Extension Methods required by Omniverse Kit
-# Any class derived from `omni.ext.IExt` in top level module (defined in `python.modules` of `extension.toml`) will be
-# instantiated when extension gets enabled and `on_startup(ext_id)` will be called. Later when extension gets disabled
-# on_shutdown() is called.
+
 class MCPExtension(omni.ext.IExt):
+    """MCP Extension with queue-based command processing for stability."""
+    
     def __init__(self) -> None:
         """Initialize the extension."""
         super().__init__()
@@ -75,67 +73,127 @@ class MCPExtension(omni.ext.IExt):
         self._server_thread = None
         self._models = None
         self._settings = carb.settings.get_settings()
-        self._image_url_cache = {} # cache for image url
-        self._text_prompt_cache = {} # cache for text prompt
-        self._captured_logs = []  # Buffer for captured log messages
+        self._image_url_cache = {}
+        self._text_prompt_cache = {}
+        self._captured_logs = []
         self._log_capture_enabled = False
-        self._max_log_buffer = 500  # Max logs to keep in buffer
+        self._max_log_buffer = 500
+        
+        # NEW: Queue-based command processing
+        self._command_queue = queue.Queue()
+        self._update_sub = None
+        self._processing_command = False
         
 
     def on_startup(self, ext_id: str):
-        """Initialize extension and UI elements"""
-        print("trigger  on_startup for: ", ext_id)
-        print("settings: ", self._settings.get("/exts/omni.kit.pipapi"))
-        self.port = self._settings.get("/exts/isaac.sim.mcp/server, port") or 8766
+        """Initialize extension and start server."""
+        print(f"[MCP] Starting extension: {ext_id}")
+        self.port = self._settings.get("/exts/isaac.sim.mcp/server.port") or 8766
         self.host = self._settings.get("/exts/isaac.sim.mcp/server.host") or "localhost"
-        if not hasattr(self, 'running'):
-            self.running = False
-
         self.ext_id = ext_id
         self._usd_context = omni.usd.get_context()
-        # omni.kit.commands.execute("CreatePrim", prim_type="Sphere")
-
-        # print("sphere created")
-        # result = self.execute_script('omni.kit.commands.execute("CreatePrim", prim_type="Cube")')
-        # print("script executed", result)  
+        
+        # Subscribe to update event for command processing
+        self._update_sub = (
+            omni.kit.app.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(self._on_update, name="mcp_command_processor")
+        )
+        
         self._start()
-        # result = self.execute_script('omni.kit.commands.execute("CreatePrim", prim_type="Cube")')
-        # print("script executed", result)  
     
     def on_shutdown(self):
-        print("trigger  on_shutdown for: ", self.ext_id)
+        """Clean up on shutdown."""
+        print(f"[MCP] Shutting down extension: {self.ext_id}")
+        
+        # Unsubscribe from update events
+        if self._update_sub:
+            self._update_sub = None
+        
         self._models = {}
         gc.collect()
         self._stop()
     
+    def _on_update(self, event):
+        """Process commands during the update cycle - runs on main thread."""
+        if self._processing_command:
+            return  # Already processing, skip
+        
+        try:
+            # Process ONE command per frame to avoid blocking
+            if not self._command_queue.empty():
+                self._processing_command = True
+                try:
+                    client, command = self._command_queue.get_nowait()
+                    self._process_command(client, command)
+                except queue.Empty:
+                    pass
+                finally:
+                    self._processing_command = False
+        except Exception as e:
+            print(f"[MCP] Error in update loop: {e}")
+            self._processing_command = False
+    
+    def _process_command(self, client, command):
+        """Process a single command and send response."""
+        try:
+            response = self.execute_command(command)
+            
+            # Safely serialize response
+            try:
+                response_json = json.dumps(response)
+            except (TypeError, ValueError) as json_err:
+                print(f"[MCP] JSON serialization failed: {json_err}")
+                response_json = json.dumps({
+                    "status": response.get("status", "success") if isinstance(response, dict) else "success",
+                    "message": str(response)
+                })
+            
+            # Log truncated response
+            log_response = response_json[:500] + "..." if len(response_json) > 500 else response_json
+            print(f"[MCP] Response: {log_response}")
+            
+            # Send response
+            try:
+                client.sendall(response_json.encode('utf-8'))
+            except Exception as send_err:
+                print(f"[MCP] Failed to send response: {send_err}")
+                
+        except Exception as e:
+            print(f"[MCP] Error processing command: {e}")
+            traceback.print_exc()
+            try:
+                error_response = {"status": "error", "message": str(e)}
+                client.sendall(json.dumps(error_response).encode('utf-8'))
+            except:
+                pass
+    
     def _start(self):
+        """Start the socket server."""
         if self.running:
-            print("Server is already running")
+            print("[MCP] Server already running")
             return
             
         self.running = True
         
         try:
-            # Create socket
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.host, self.port))
             self.socket.listen(1)
             
-            # Start server thread
-            self.server_thread = threading.Thread(target=self._server_loop)
-            self.server_thread.daemon = True
+            self.server_thread = threading.Thread(target=self._server_loop, daemon=True)
             self.server_thread.start()
             
-            print(f"Isaac Sim MCP server started on {self.host}:{self.port}")
+            print(f"[MCP] Server started on {self.host}:{self.port}")
         except Exception as e:
-            print(f"Failed to start server: {str(e)}")
-            self.stop()
+            print(f"[MCP] Failed to start server: {e}")
+            self._stop()
             
     def _stop(self):
+        """Stop the socket server."""
         self.running = False
         
-        # Close socket
         if self.socket:
             try:
                 self.socket.close()
@@ -143,7 +201,6 @@ class MCPExtension(omni.ext.IExt):
                 pass
             self.socket = None
         
-        # Wait for thread to finish
         if self.server_thread:
             try:
                 if self.server_thread.is_alive():
@@ -152,160 +209,108 @@ class MCPExtension(omni.ext.IExt):
                 pass
             self.server_thread = None
         
-        print("Isaac Sim MCP server stopped")
+        print("[MCP] Server stopped")
 
     def _server_loop(self):
-        """Main server loop in a separate thread"""
-        print("Server thread started")
-        self.socket.settimeout(1.0)  # Timeout to allow for stopping
-        if not hasattr(self, 'running'):
-            self.running = False
+        """Main server loop - accepts connections."""
+        print("[MCP] Server thread started")
+        self.socket.settimeout(1.0)
 
         while self.running:
             try:
-                # Accept new connection
                 try:
                     client, address = self.socket.accept()
-                    print(f"Connected to client: {address}")
+                    print(f"[MCP] Client connected: {address}")
                     
-                    # Handle client in a separate thread
                     client_thread = threading.Thread(
                         target=self._handle_client,
-                        args=(client,)
+                        args=(client,),
+                        daemon=True
                     )
-                    client_thread.daemon = True
                     client_thread.start()
                 except socket.timeout:
-                    # Just check running condition
                     continue
                 except Exception as e:
-                    print(f"Error accepting connection: {str(e)}")
+                    if self.running:
+                        print(f"[MCP] Error accepting connection: {e}")
                     time.sleep(0.5)
             except Exception as e:
-                print(f"Error in server loop: {str(e)}")
-                if not self.running:
-                    break
+                if self.running:
+                    print(f"[MCP] Error in server loop: {e}")
                 time.sleep(0.5)
         
-        print("Server thread stopped")
+        print("[MCP] Server thread stopped")
     
     def _handle_client(self, client):
-        """Handle connected client"""
-        print("Client handler started")
-        client.settimeout(None)  # No timeout
+        """Handle a connected client - receives commands and queues them."""
+        print("[MCP] Client handler started")
+        client.settimeout(30.0)  # 30 second timeout for receiving data
         buffer = b''
         
         try:
             while self.running:
-                # Receive data
                 try:
                     data = client.recv(16384)
                     if not data:
-                        print("Client disconnected")
+                        print("[MCP] Client disconnected")
                         break
                     
                     buffer += data
+                    
                     try:
-                        # Try to parse command
                         command = json.loads(buffer.decode('utf-8'))
                         buffer = b''
                         
-                        # Execute command in Isaac Sim's main thread
-                        async def execute_wrapper():
-                            try:
-                                response = self.execute_command(command)
-                                # Safely serialize response, handling non-JSON-serializable objects
-                                try:
-                                    response_json = json.dumps(response)
-                                except (TypeError, ValueError) as json_err:
-                                    # Fallback: convert response to string representation
-                                    print(f"JSON serialization failed: {json_err}, using string fallback")
-                                    response_json = json.dumps({
-                                        "status": response.get("status", "success") if isinstance(response, dict) else "success",
-                                        "message": str(response)
-                                    })
-                                print("response_json: ", response_json[:500] if len(response_json) > 500 else response_json)
-                                try:
-                                    client.sendall(response_json.encode('utf-8'))
-                                except:
-                                    print("Failed to send response - client disconnected")
-                            except Exception as e:
-                                print(f"Error executing command: {str(e)}")
-                                traceback.print_exc()
-                                try:
-                                    error_response = {
-                                        "status": "error",
-                                        "message": str(e)
-                                    }
-                                    client.sendall(json.dumps(error_response).encode('utf-8'))
-                                except:
-                                    pass
-                            return None
-                        # import omni.kit.commands
-                        # import omni.kit.async
-                        from omni.kit.async_engine import run_coroutine
-                        task = run_coroutine(execute_wrapper())
-                        # import asyncio
-                        # asyncio.ensure_future(execute_wrapper())
-                        #time.sleep(30)
+                        # Queue the command for processing in the main thread
+                        self._command_queue.put((client, command))
                         
-    
-                        # 
-                        # omni.kit.async.get_event_loop().create_task(create_sphere_async())
-                        # TODO:Schedule execution in main thread
-                        # bpy.app.timers.register(execute_wrapper, first_interval=0.0)
-                        # omni.kit.app.get_app().post_to_main_thread(execute_wrapper())
-                        # carb.apputils.get_app().get_update_event_loop().post(execute_wrapper)
-
-                        # from omni.kit.async_engine import run_coroutine
-                        # run_coroutine(execute_wrapper())
-                        # omni.kit.app.get_app().get_update_event_stream().push(0, 0, {"fn": execute_wrapper})
+                        # Wait for response (the update loop will process it)
+                        # We don't need to do anything here - response is sent by _process_command
+                        
                     except json.JSONDecodeError:
                         # Incomplete data, wait for more
-                        pass
+                        if len(buffer) > 1024 * 1024:  # 1MB limit
+                            print("[MCP] Buffer overflow, clearing")
+                            buffer = b''
+                            
+                except socket.timeout:
+                    # Check if still running
+                    continue
                 except Exception as e:
-                    print(f"Error receiving data: {str(e)}")
+                    print(f"[MCP] Error receiving data: {e}")
                     break
+                    
         except Exception as e:
-            print(f"Error in client handler: {str(e)}")
+            print(f"[MCP] Error in client handler: {e}")
         finally:
             try:
                 client.close()
             except:
                 pass
-            print("Client handler stopped")
+            print("[MCP] Client handler stopped")
 
-    # TODO: This is a temporary function to execute commands in the main thread
     def execute_command(self, command):
-        """Execute a command in the main thread"""
+        """Execute a command - called from main thread via update loop."""
         try:
             cmd_type = command.get("type")
             params = command.get("params", {})
             
-            # TODO: Ensure we're in the right context
             if cmd_type in ["create_object", "modify_object", "delete_object"]:
                 self._usd_context = omni.usd.get_context()
-                self._execute_command_internal(command)
-            else:
-                return self._execute_command_internal(command)
+            
+            return self._execute_command_internal(command)
                 
         except Exception as e:
-            print(f"Error executing command: {str(e)}")
+            print(f"[MCP] Error executing command: {e}")
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
 
     def _execute_command_internal(self, command):
-        """Internal command execution with proper context"""
+        """Internal command execution."""
         cmd_type = command.get("type")
         params = command.get("params", {})
 
-        #todo: add a handler for extend simulation method if necessary
         handlers = {
-            # "get_scene_info": self.get_scene_info,
-            # "create_object": self.create_object,
-            # "modify_object": self.modify_object,
-            # "delete_object": self.delete_object,
-            # "get_object_info": self.get_object_info,
             "execute_script": self.execute_script,
             "get_scene_info": self.get_scene_info,
             "omini_kit_command": self.omini_kit_command,
@@ -321,33 +326,23 @@ class MCPExtension(omni.ext.IExt):
         handler = handlers.get(cmd_type)
         if handler:
             try:
-                print(f"Executing handler for {cmd_type}")
+                print(f"[MCP] Executing: {cmd_type}")
                 result = handler(**params)
-                print(f"Handler execution complete: /n", result)
-                # return result
+                print(f"[MCP] Completed: {cmd_type}")
+                
                 if result and result.get("status") == "success":   
                     return {"status": "success", "result": result}
                 else:
                     return {"status": "error", "message": result.get("message", "Unknown error")}
             except Exception as e:
-                print(f"Error in handler: {str(e)}")
+                print(f"[MCP] Error in handler {cmd_type}: {e}")
                 traceback.print_exc()
                 return {"status": "error", "message": str(e)}
         else:
             return {"status": "error", "message": f"Unknown command type: {cmd_type}"}
-        
 
-    
-
-    def execute_script(self, code: str) :
-        """Execute a Python script within the Isaac Sim context.
-        
-        Args:
-            code: The Python script to execute.
-            
-        Returns:
-            Dictionary with execution result and captured stdout.
-        """
+    def execute_script(self, code: str):
+        """Execute a Python script within the Isaac Sim context."""
         import io
         import sys
         
@@ -361,59 +356,44 @@ class MCPExtension(omni.ext.IExt):
                 return [make_json_safe(item) for item in obj]
             if isinstance(obj, dict):
                 return {str(k): make_json_safe(v) for k, v in obj.items()}
-            # For any other object, convert to string representation
             return str(obj)
         
         def make_ascii_safe(text):
-            """Convert text to ASCII-safe string, replacing problematic characters."""
+            """Convert text to ASCII-safe string."""
             if not isinstance(text, str):
                 return str(text)
-            # Replace common unicode symbols with ASCII equivalents
             replacements = {
-                '\u2713': '[OK]',    # checkmark
-                '\u2714': '[OK]',    # heavy checkmark
-                '\u2717': '[X]',     # ballot x
-                '\u2718': '[X]',     # heavy ballot x
-                '\u2192': '->',      # right arrow
-                '\u2190': '<-',      # left arrow
-                '\u2022': '*',       # bullet
-                '\u25cf': '*',       # black circle
+                '\u2713': '[OK]', '\u2714': '[OK]',
+                '\u2717': '[X]', '\u2718': '[X]',
+                '\u2192': '->', '\u2190': '<-',
+                '\u2022': '*', '\u25cf': '*',
             }
             for unicode_char, ascii_char in replacements.items():
                 text = text.replace(unicode_char, ascii_char)
-            # Encode to ASCII, replacing any remaining problematic chars
             return text.encode('ascii', errors='replace').decode('ascii')
         
         old_stdout = None
         try:
-            # Capture stdout
             old_stdout = sys.stdout
             sys.stdout = captured_output = io.StringIO()
             
-            # Create a local namespace
-            local_ns = {}
+            local_ns = {
+                "omni": omni,
+                "carb": carb,
+                "Usd": Usd,
+                "UsdGeom": UsdGeom,
+                "Sdf": Sdf,
+                "Gf": Gf,
+            }
             
-            # Add frequently used modules to the namespace
-            local_ns["omni"] = omni
-            local_ns["carb"] = carb
-            local_ns["Usd"] = Usd
-            local_ns["UsdGeom"] = UsdGeom
-            local_ns["Sdf"] = Sdf
-            local_ns["Gf"] = Gf
-            
-            # Add helper functions for safe prim access
             def safe_get_prim(path):
-                """Safely get a prim, returns None if not found or invalid."""
                 stage = omni.usd.get_context().get_stage()
                 if not stage:
                     return None
                 prim = stage.GetPrimAtPath(path)
-                if prim and prim.IsValid():
-                    return prim
-                return None
+                return prim if prim and prim.IsValid() else None
             
             def safe_traverse(root_path):
-                """Safely traverse prims under a path, skipping invalid ones."""
                 stage = omni.usd.get_context().get_stage()
                 if not stage:
                     return
@@ -427,14 +407,11 @@ class MCPExtension(omni.ext.IExt):
             local_ns["safe_get_prim"] = safe_get_prim
             local_ns["safe_traverse"] = safe_traverse
             
-            # Execute the script
             exec(code, local_ns)
             
-            # Get captured output - make it ASCII safe
             output = make_ascii_safe(captured_output.getvalue())
             sys.stdout = old_stdout
             
-            # Get the result if set in script - make it JSON safe
             result = local_ns.get("result", None)
             result = make_json_safe(result)
             
@@ -445,14 +422,11 @@ class MCPExtension(omni.ext.IExt):
                 "output": output
             }
         except Exception as e:
-            # Restore stdout on error
             if old_stdout is not None:
                 sys.stdout = old_stdout
             error_msg = make_ascii_safe(str(e))
-            carb.log_error(f"Error executing script: {error_msg}")
-            import traceback
+            carb.log_error(f"[MCP] Script error: {error_msg}")
             tb = make_ascii_safe(traceback.format_exc())
-            carb.log_error(tb)
             return {
                 "status": "error",
                 "message": error_msg,
@@ -460,60 +434,40 @@ class MCPExtension(omni.ext.IExt):
             }
         
     def get_scene_info(self):
+        """Get current scene information."""
         self._stage = omni.usd.get_context().get_stage()
         assert self._stage is not None
-        stage_path = self._stage.GetRootLayer().realPath
         assets_root_path = get_assets_root_path()
         return {"status": "success", "message": "pong", "assets_root_path": assets_root_path}
     
     def simulation_control(self, action: str = "status", frames: int = 60):
-        """Control simulation playback.
-        
-        Args:
-            action: "play", "stop", "pause", "step", or "status"
-            frames: Number of frames to step (only for "step" action, max 60)
-        
-        Returns:
-            Dictionary with simulation state
-        """
+        """Control simulation playback."""
         try:
-            import omni.timeline
             timeline = omni.timeline.get_timeline_interface()
             
-            result = {
-                "status": "success",
-                "action": action,
-            }
+            result = {"status": "success", "action": action}
             
             if action == "play":
                 timeline.play()
                 result["message"] = "Simulation started"
-                
             elif action == "stop":
                 timeline.stop()
                 result["message"] = "Simulation stopped"
-                
             elif action == "pause":
                 timeline.pause()
                 result["message"] = "Simulation paused"
-                
             elif action == "step":
-                # For stepping, just forward time on the timeline
-                # This avoids blocking the async event loop
                 frames = min(frames, 60)
                 current_time = timeline.get_current_time()
                 fps = timeline.get_time_codes_per_seconds()
                 new_time = current_time + (frames / fps)
                 timeline.set_current_time(new_time)
                 result["message"] = f"Advanced timeline by {frames} frames to {new_time:.2f}s"
-                
             elif action == "status":
                 result["message"] = "Current simulation status"
-                
             else:
                 return {"status": "error", "message": f"Unknown action: {action}"}
             
-            # Always include current state
             result["is_playing"] = timeline.is_playing()
             result["is_stopped"] = timeline.is_stopped()
             result["current_time"] = timeline.get_current_time()
@@ -524,41 +478,23 @@ class MCPExtension(omni.ext.IExt):
             return {"status": "error", "message": str(e)}
     
     def capture_logs(self, action: str = "get", clear: bool = False, filter_level: str = "all"):
-        """Capture and retrieve Isaac Sim console logs by reading the log file.
-        
-        Args:
-            action: "start" to mark timestamp, "stop" to end, "get" to retrieve logs, "clear" to reset
-            clear: If True, clear the log buffer after returning
-            filter_level: "all", "error", "warning", or "info"
-        
-        Returns:
-            Dictionary with captured logs
-        """
+        """Capture and retrieve Isaac Sim console logs."""
         import os
         
         try:
-            # Get log file path from carb settings
             log_file = carb.settings.get_settings().get("/log/file")
             
             if action == "start":
-                # Mark the current log position
                 self._log_start_line = 0
                 if log_file and os.path.exists(log_file):
                     with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                         self._log_start_line = sum(1 for _ in f)
                 self._log_capture_enabled = True
-                return {
-                    "status": "success",
-                    "message": "Log capture started",
-                    "log_file": log_file
-                }
+                return {"status": "success", "message": "Log capture started", "log_file": log_file}
                 
             elif action == "stop":
                 self._log_capture_enabled = False
-                return {
-                    "status": "success",
-                    "message": "Log capture stopped"
-                }
+                return {"status": "success", "message": "Log capture stopped"}
                 
             elif action == "get":
                 logs = []
@@ -569,13 +505,8 @@ class MCPExtension(omni.ext.IExt):
                     with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                         all_lines = f.readlines()
                     
-                    # Get lines since start (or last 500 if no start marker)
-                    if start_line > 0:
-                        recent_lines = all_lines[start_line:]
-                    else:
-                        recent_lines = all_lines[-500:]
+                    recent_lines = all_lines[start_line:] if start_line > 0 else all_lines[-500:]
                     
-                    # Filter by level
                     for line in recent_lines:
                         line = line.strip()
                         if not line:
@@ -587,7 +518,6 @@ class MCPExtension(omni.ext.IExt):
                         elif "[Warning]" in line:
                             level = "warning"
                         
-                        # Apply filter
                         if filter_level == "error" and level != "error":
                             continue
                         elif filter_level == "warning" and level not in ["error", "warning"]:
@@ -595,11 +525,9 @@ class MCPExtension(omni.ext.IExt):
                         
                         logs.append({"level": level, "message": line[:300]})
                 
-                if clear:
-                    # Reset start position to current
-                    if log_file and os.path.exists(log_file):
-                        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                            self._log_start_line = sum(1 for _ in f)
+                if clear and log_file and os.path.exists(log_file):
+                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        self._log_start_line = sum(1 for _ in f)
                 
                 return {
                     "status": "success",
@@ -609,14 +537,10 @@ class MCPExtension(omni.ext.IExt):
                 }
             
             elif action == "clear":
-                # Reset start position to current end of file
                 if log_file and os.path.exists(log_file):
                     with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                         self._log_start_line = sum(1 for _ in f)
-                return {
-                    "status": "success",
-                    "message": "Log position reset"
-                }
+                return {"status": "success", "message": "Log position reset"}
                 
             else:
                 return {"status": "error", "message": f"Unknown action: {action}"}
@@ -624,58 +548,36 @@ class MCPExtension(omni.ext.IExt):
         except Exception as e:
             return {"status": "error", "message": str(e)}
         
-    def omini_kit_command(self,  command: str, prim_type: str) -> Dict[str, Any]:
+    def omini_kit_command(self, command: str, prim_type: str) -> Dict[str, Any]:
+        """Execute an Omni Kit command."""
         omni.kit.commands.execute(command, prim_type=prim_type)
-        print("command executed")
         return {"status": "success", "message": "command executed"}
     
     def create_robot(self, robot_type: str = "g1", position: List[float] = [0, 0, 0]):
+        """Create a robot in the scene."""
         from omni.isaac.core.utils.prims import create_prim
-        from omni.isaac.core.utils.stage import add_reference_to_stage, is_stage_loading
-        from omni.isaac.nucleus import get_assets_root_path
-        
+        from omni.isaac.core.utils.stage import add_reference_to_stage
 
         stage = omni.usd.get_context().get_stage()
         assets_root_path = get_assets_root_path()
-        print("position: ", position)
         
-        if robot_type.lower() == "franka":
-            asset_path = assets_root_path + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
-            add_reference_to_stage(asset_path, "/Franka")
-            robot_prim = XFormPrim(prim_path="/Franka")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
-        elif robot_type.lower() == "jetbot":
-            asset_path = assets_root_path + "/Isaac/Robots/Jetbot/jetbot.usd"
-            add_reference_to_stage(asset_path, "/Jetbot")
-            robot_prim = XFormPrim(prim_path="/Jetbot")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
-        elif robot_type.lower() == "carter":
-            asset_path = assets_root_path + "/Isaac/Robots/Carter/carter.usd"
-            add_reference_to_stage(asset_path, "/Carter")
-            robot_prim = XFormPrim(prim_path="/Carter")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
-        elif robot_type.lower() == "g1":
-            asset_path = assets_root_path + "/Isaac/Robots/Unitree/G1/g1.usd"
-            add_reference_to_stage(asset_path, "/G1")
-            robot_prim = XFormPrim(prim_path="/G1")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
-        elif robot_type.lower() == "go1":
-            asset_path = assets_root_path + "/Isaac/Robots/Unitree/Go1/go1.usd"
-            add_reference_to_stage(asset_path, "/Go1")
-            robot_prim = XFormPrim(prim_path="/Go1")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
-        else:
-            # Default to Franka if unknown robot type
-            asset_path = assets_root_path + "/Isaac/Robots/Franka/franka_alt_fingers.usd"
-            add_reference_to_stage(asset_path, "/Franka")
-            robot_prim = XFormPrim(prim_path="/Franka")
-            robot_prim.set_world_pose(position=np.array(position))
-            return {"status": "success", "message": f"{robot_type} robot created"}
+        robot_configs = {
+            "franka": ("/Isaac/Robots/Franka/franka_alt_fingers.usd", "/Franka"),
+            "jetbot": ("/Isaac/Robots/Jetbot/jetbot.usd", "/Jetbot"),
+            "carter": ("/Isaac/Robots/Carter/carter.usd", "/Carter"),
+            "g1": ("/Isaac/Robots/Unitree/G1/g1.usd", "/G1"),
+            "go1": ("/Isaac/Robots/Unitree/Go1/go1.usd", "/Go1"),
+        }
+        
+        config = robot_configs.get(robot_type.lower(), robot_configs["franka"])
+        asset_path = assets_root_path + config[0]
+        prim_path = config[1]
+        
+        add_reference_to_stage(asset_path, prim_path)
+        robot_prim = XFormPrim(prim_path=prim_path)
+        robot_prim.set_world_pose(position=np.array(position))
+        
+        return {"status": "success", "message": f"{robot_type} robot created at {prim_path}"}
     
     def create_physics_scene(
             self,
@@ -684,383 +586,188 @@ class MCPExtension(omni.ext.IExt):
             gravity: List[float] = (0.0, -9.81, 0.0),
             scene_name: str = "None"
         ) -> Dict[str, Any]:
-            """Create a physics scene with multiple objects."""
-            try:
-                # Set default values
-                gravity = gravity or [0, -9.81, 0]
-                scene_name = scene_name or "physics_scene"
-                
-                
-                # Create a new stage
-                #omni.kit.commands.execute("CreateNewStage")
-                
-                
-                stage = omni.usd.get_context().get_stage()
-                print("stage: ", stage)
-                
-                # print("start to create new sphere")
-                # # import omni.kit.commands
-                # omni.kit.commands.execute("CreatePrim", prim_type="Sphere")
-                # print("create sphere successfully")
-                
-                # Set up the physics scene
-                scene_path = "/World/PhysicsScene"
+        """Create a physics scene with multiple objects."""
+        try:
+            gravity = gravity or [0, -9.81, 0]
+            scene_name = scene_name or "physics_scene"
+            
+            stage = omni.usd.get_context().get_stage()
+            
+            scene_path = "/World/PhysicsScene"
+            omni.kit.commands.execute("CreatePrim", prim_path=scene_path, prim_type="PhysicsScene")
+
+            world_path = "/World"
+            omni.kit.commands.execute("CreatePrim", prim_path=world_path, prim_type="Xform")
+            
+            if floor:
+                floor_path = "/World/ground"
                 omni.kit.commands.execute(
                     "CreatePrim",
-                    prim_path=scene_path,
-                    prim_type="PhysicsScene",
-                    
+                    prim_path=floor_path,
+                    prim_type="Plane",
+                    attributes={"size": 100.0}
                 )
-                #attributes={"physxScene:enabled": True , "physxScene:gravity": gravity},
                 
-
-                # Initialize simulation context with physics
-                # simulation_context = SimulationContext()
-                # my_world = World(physics_dt=1.0 / 60.0, rendering_dt=1.0 / 60.0, stage_units_in_meters=1.0)
-        
-                # # Make sure the world is playing before initializing the robot
-                # if not my_world.is_playing():
-                #     my_world.play()
-                #     # Wait a few frames for physics to stabilize
-                # for _ in range(1000):
-                #     my_world.step_async()
-                # my_world.initialize_physics()
-
-                # print("created physics scene: ", scene_path)
+            objects_created = 0
+            for i, obj in enumerate(objects):
+                obj_name = obj.get("name", f"object_{i}")
+                obj_type = obj.get("type", "Cube")
+                obj_position = obj.get("position", [0, 0, 0])
+                obj_rotation = obj.get("rotation", [1, 0, 0, 0])
+                obj_scale = obj.get("scale", [1, 1, 1])
+                obj_color = obj.get("color", [0.5, 0.5, 0.5, 1.0])
+                obj_physics = obj.get("physics_enabled", True)
+                obj_mass = obj.get("mass", 1.0)
+                obj_kinematic = obj.get("is_kinematic", False)
                 
-                # Create the World prim as a Xform
-                world_path = "/World"
-                omni.kit.commands.execute(
-                    "CreatePrim",
-                    prim_path=world_path,
-                    prim_type="Xform",
-                )
-                print("create world: ", world_path)
-                # Create a ground plane if requested
-                if floor:
-                    floor_path = "/World/ground"
+                obj_path = obj.get("path", f"/World/{obj_name}")
+                
+                if stage.GetPrimAtPath(obj_path):
+                    continue
+                
+                if obj_type in ["Cube", "Sphere", "Cylinder", "Cone", "Plane"]:
                     omni.kit.commands.execute(
                         "CreatePrim",
-                        prim_path=floor_path,
-                        prim_type="Plane",
-                        attributes={"size": 100.0}  # Large ground plane
+                        prim_path=obj_path,
+                        prim_type=obj_type,
+                        attributes={"size": obj.get("size", 100.0)} if obj_type in ["Cube", "Sphere", "Plane"] else {},
                     )
-                    
-                    # Add physics properties to the ground
-                    # omni.kit.commands.execute(
-                    #     "CreatePhysics",
-                    #     prim_path=floor_path,
-                    #     physics_type="collider",
-                    #     attributes={
-                    #         "static": True,
-                    #         "collision_enabled": True
-                    #     }
-                    # )
-                # objects = [
-                # {"path": "/World/Cube", "type": "Cube", "size": 20, "position": (0, 100, 0), "rotation": [1, 2, 3, 0], "scale": [1, 1, 1], "color": [0.5, 0.5, 0.5, 1.0], "physics_enabled": True, "mass": 1.0, "is_kinematic": False},
-                # {"path": "/World/Sphere", "type": "Sphere", "radius": 5, "position": (5, 200, 0)},
-                # {"path": "/World/Cone", "type": "Cone", "height": 8, "radius": 3, "position": (-5, 150, 0)}
-                # ]
-                print("start create objects: ", objects)
-                objects_created = 0
-                # Create each object
-                for i, obj in enumerate(objects):
-                    obj_name = obj.get("name", f"object_{i}")
-                    obj_type = obj.get("type", "Cube")
-                    obj_position = obj.get("position", [0, 0, 0])
-                    obj_rotation = obj.get("rotation", [1, 0, 0, 0])  # Default is no rotation (identity quaternion)
-                    obj_scale = obj.get("scale", [1, 1, 1])
-                    obj_color = obj.get("color", [0.5, 0.5, 0.5, 1.0])
-                    obj_physics = obj.get("physics_enabled", True)
-                    obj_mass = obj.get("mass", 1.0)
-                    obj_kinematic = obj.get("is_kinematic", False)
-                    
-                    # Create the object
-                    obj_path = obj.get("path", f"/World/{obj_name}")
-                    print("obj_path: ", obj_path)
-                    if stage.GetPrimAtPath(obj_path):
-                        print("obj_path already exists and skip creating")
-                        continue
-                    
-                    # Create the primitive based on type
-                    if obj_type in ["Cube", "Sphere", "Cylinder", "Cone", "Plane"]:
-                        omni.kit.commands.execute(
-                            "CreatePrim",
-                            prim_path=obj_path,
-                            prim_type=obj_type,
-                            attributes={
-                                "size": obj.get("size", 100.0), 
-                                "position": obj_position, 
-                                "rotation": obj_rotation, 
-                                "scale": obj_scale, 
-                                "color": obj_color, 
-                                "physics_enabled": obj_physics,
-                                "mass": obj_mass,
-                                "is_kinematic": obj_kinematic} if obj_type in ["Cube", "Sphere","Plane"] else {},
-                        )
-                        print(f"Created {obj_type} at {obj_path}")
-                    else:
-                        return {"status": "error", "message": f"Invalid object type: {obj_type}"}
-                    
-                    # Set the transform
-                    omni.kit.commands.execute(
-                        "TransformPrimSRT",
-                        path=obj_path,
-                        new_translation=obj_position,
-                        new_rotation_euler=[0, 0, 0],  # We'll set the quaternion separately
-                        new_scale=obj_scale,
-                    )
-                    print(f"Created TransformPrimSRT at {obj_position}")
-                    # Set rotation as quaternion
-                    xform = UsdGeom.Xformable(stage.GetPrimAtPath(obj_path))
-                    if xform and obj_rotation != [1, 0, 0, 0]:
-                        quat = Gf.Quatf(obj_rotation[0], obj_rotation[1], obj_rotation[2], obj_rotation[3])
-                        xform_op = xform.AddRotateOp()
-                        xform_op.Set(quat)
-                    
-                    # Add physics properties if enabled
-                    if obj_physics:
-                        omni.kit.commands.execute(
-                            "CreatePhysics",
-                            prim_path=obj_path,
-                            physics_type="rigid_body" if not obj_kinematic else "kinematic_body",
-                            attributes={
-                                "mass": obj_mass,
-                                "collision_enabled": True,
-                                "kinematic": obj_kinematic
-                            }
-                        )
-                    print(f"Created Physics at {obj_path}")
-                    # Set the color
-                    if obj_color:
-                        material_path = f"{obj_path}/material"
-                        omni.kit.commands.execute(
-                            "CreatePrim",
-                            prim_path=material_path,
-                            prim_type="Material",
-                            attributes={
-                                "diffuseColor": obj_color[:3],
-                                "opacity": obj_color[3] if len(obj_color) > 3 else 1.0
-                            }
-                        )
-                        print(f"Created Material at {material_path}")
-                        # Bind the material to the object
-                        omni.kit.commands.execute(
-                            "BindMaterial",
-                            material_path=material_path,
-                            prim_path=obj_path
-                        )
-
-                        print(f"Bound Material to {obj_path}")
-                        # increment the number of objects created
-                        objects_created += 1
-                return {
-                    "status": "success",
-                    "message": f"Created physics scene with {objects_created} objects",
-                    "result": scene_name
-                }
+                else:
+                    return {"status": "error", "message": f"Invalid object type: {obj_type}"}
                 
-            except Exception as e:
-                import traceback
-                return {
-                    "status": "error",
-                    "message": str(e),
-                    "traceback": traceback.format_exc()
-                }
+                omni.kit.commands.execute(
+                    "TransformPrimSRT",
+                    path=obj_path,
+                    new_translation=obj_position,
+                    new_rotation_euler=[0, 0, 0],
+                    new_scale=obj_scale,
+                )
+                
+                xform = UsdGeom.Xformable(stage.GetPrimAtPath(obj_path))
+                if xform and obj_rotation != [1, 0, 0, 0]:
+                    quat = Gf.Quatf(obj_rotation[0], obj_rotation[1], obj_rotation[2], obj_rotation[3])
+                    xform_op = xform.AddRotateOp()
+                    xform_op.Set(quat)
+                
+                if obj_physics:
+                    omni.kit.commands.execute(
+                        "CreatePhysics",
+                        prim_path=obj_path,
+                        physics_type="rigid_body" if not obj_kinematic else "kinematic_body",
+                        attributes={"mass": obj_mass, "collision_enabled": True, "kinematic": obj_kinematic}
+                    )
+                
+                if obj_color:
+                    material_path = f"{obj_path}/material"
+                    omni.kit.commands.execute(
+                        "CreatePrim",
+                        prim_path=material_path,
+                        prim_type="Material",
+                        attributes={"diffuseColor": obj_color[:3], "opacity": obj_color[3] if len(obj_color) > 3 else 1.0}
+                    )
+                    omni.kit.commands.execute("BindMaterial", material_path=material_path, prim_path=obj_path)
+                    objects_created += 1
+                    
+            return {
+                "status": "success",
+                "message": f"Created physics scene with {objects_created} objects",
+                "result": scene_name
+            }
+                
+        except Exception as e:
+            return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
    
     def generate_3d_from_text_or_image(self, text_prompt=None, image_url=None, position=(0, 0, 50), scale=(10, 10, 10)):
-        """
-        Generate a 3D model from text or image, load it into the scene and transform it.
-        
-        Args:
-            text_prompt (str, optional): Text prompt for 3D generation
-            image_url (str, optional): URL of image for 3D generation
-            position (tuple, optional): Position to place the model
-            scale (tuple, optional): Scale of the model
-            
-        Returns:
-            dict: Dictionary with the task_id and prim_path
-        """
+        """Generate a 3D model from text or image."""
         try:
-            # Initialize Beaver3d
             beaver = Beaver3d()
             
-            # Determine generation method based on inputs
-            # if image_url and text_prompt:
-            #     # Generate 3D from image with text prompt as options
-            #     task_id = beaver.generate_3d_from_image(image_url, text_prompt)
-            #     print(f"3D model generation from image with text options started with task ID: {task_id}")
-            # Check if we have cached task IDs for this input
             if not hasattr(self, '_image_url_cache'):
-                self._image_url_cache = {}  # Cache for image URL to task_id mapping
-            
+                self._image_url_cache = {}
             if not hasattr(self, '_text_prompt_cache'):
-                self._text_prompt_cache = {}  # Cache for text prompt to task_id mapping
+                self._text_prompt_cache = {}
             
-            # Check if we can retrieve task_id from cache
             task_id = None
             if image_url and image_url in self._image_url_cache:
                 task_id = self._image_url_cache[image_url]
-                print(f"Using cached task ID: {task_id} for image URL: {image_url}")
             elif text_prompt and text_prompt in self._text_prompt_cache:
                 task_id = self._text_prompt_cache[text_prompt]
-                print(f"Using cached task ID: {task_id} for text prompt: {text_prompt}")
 
-            if task_id: #cache hit
-                print(f"Using cached model ID: {task_id}")
+            if task_id:
+                print(f"[MCP] Using cached model ID: {task_id}")
             elif image_url:
-                # Generate 3D from image only
                 task_id = beaver.generate_3d_from_image(image_url)
-                print(f"3D model generation from image started with task ID: {task_id}")
             elif text_prompt:
-                # Generate 3D from text
                 task_id = beaver.generate_3d_from_text(text_prompt)
-                print(f"3D model generation from text started with task ID: {task_id}")
             else:
-                return {
-                    "status": "error",
-                    "message": "Either text_prompt or image_url must be provided"
-                }
+                return {"status": "error", "message": "Either text_prompt or image_url must be provided"}
             
-            # Monitor the task and download the result
-            # result_path = beaver.monitor_task_status(task_id)
-            # task = asyncio.create_task(
-                # beaver.monitor_task_status_async(
-                    # task_id, on_complete_callback=load_model_into_scene))
-            #await task
             def load_model_into_scene(task_id, status, result_path):
-                print(f"{task_id} is {status}, 3D model  downloaded to: {result_path}")
-                # Only cache the task_id after successful download
+                print(f"[MCP] {task_id} is {status}, downloaded to: {result_path}")
                 if image_url and image_url not in self._image_url_cache:
                     self._image_url_cache[image_url] = task_id
                 elif text_prompt and text_prompt not in self._text_prompt_cache:
                     self._text_prompt_cache[text_prompt] = task_id
-                # Load the model into the scene
+                    
                 loader = USDLoader()
                 prim_path = loader.load_usd_model(task_id=task_id)
                 
-                # Load texture and create material
                 try:
                     texture_path, material = loader.load_texture_and_create_material(task_id=task_id)
-                    
-                    # Bind texture to model
                     loader.bind_texture_to_model()
                 except Exception as e:
-                    print(f"Warning: Texture loading failed, continuing without texture: {str(e)}")
+                    print(f"[MCP] Texture loading failed: {e}")
                 
-                # Transform the model
                 loader.transform(position=position, scale=scale)
-            
-                return {
-                    "status": "success",
-                    "task_id": task_id,
-                    "prim_path": prim_path
-                }
+                return {"status": "success", "task_id": task_id, "prim_path": prim_path}
             
             from omni.kit.async_engine import run_coroutine
-            task = run_coroutine(beaver.monitor_task_status_async(
-                task_id, on_complete_callback=load_model_into_scene))
+            run_coroutine(beaver.monitor_task_status_async(task_id, on_complete_callback=load_model_into_scene))
             
-            return {
-                    "status": "success",
-                    "task_id": task_id,
-                    "message": f"3D model generation started with task ID: {task_id}"
-            }
-            
-            
+            return {"status": "success", "task_id": task_id, "message": f"3D model generation started: {task_id}"}
             
         except Exception as e:
-            print(f"Error generating 3D model: {str(e)}")
             traceback.print_exc()
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
     
-    def search_3d_usd_by_text(self, text_prompt:str, target_path:str, position=(0, 0, 50), scale=(10, 10, 10)):
-        """
-        Search a USD assets in USD Search service, load it into the scene and transform it.
-        
-        Args:
-            text_prompt (str, optional): Text prompt for 3D generation
-            target_path (str, ): target path in current scene stage
-            position (tuple, optional): Position to place the model
-            scale (tuple, optional): Scale of the model
-            
-        Returns:
-            dict: Dictionary with prim_path
-        """
+    def search_3d_usd_by_text(self, text_prompt: str, target_path: str, position=(0, 0, 50), scale=(10, 10, 10)):
+        """Search for a USD asset and load it."""
         try:
-            if text_prompt:
-                print(f"3D model generation from text: {text_prompt}")
-            else:
-                return {
-                    "status": "error",
-                    "message": "text_prompt must be provided"
-                }
+            if not text_prompt:
+                return {"status": "error", "message": "text_prompt must be provided"}
             
             searcher3d = USDSearch3d()
-            url = searcher3d.search( text_prompt )
+            url = searcher3d.search(text_prompt)
 
             loader = USDLoader()
-            prim_path = loader.load_usd_from_url( url, target_path )
-            print(f"loaded url {url} to scene, prim path is: {prim_path}")
-            # TODO: transform the model, need to fix the transform function for loaded USD
-            # loader.transform(prim=prim_path, position=position, scale=scale)
-            
-            return {
-                    "status": "success",
-                    "prim_path": prim_path,
-                    "message": f"3D model searching with prompt: {text_prompt}, return url: {url}, prim path in current scene: {prim_path}"
-            }
-        except Exception as e:
-            print(f"Error searching 3D model: {str(e)}")
-            traceback.print_exc()
-            return {
-                "status": "error",
-                "message": str(e)
-            }
-    
-    def transform(self, prim_path, position=(0, 0, 50), scale=(10, 10, 10)):
-        """
-        Transform a USD model by applying position and scale.
-        
-        Args:
-            prim_path (str): Path to the USD prim to transform
-            position (tuple, optional): The position to set (x, y, z)
-            scale (tuple, optional): The scale to set (x, y, z)
-            
-        Returns:
-            dict: Result information
-        """
-        try:
-            # Get the USD context
-            stage = omni.usd.get_context().get_stage()
-            
-            # Get the prim
-            prim = stage.GetPrimAtPath(prim_path)
-            if not prim:
-                return {
-                    "status": "error",
-                    "message": f"Prim not found at path: {prim_path}"
-                }
-            
-            # Initialize USDLoader
-            loader = USDLoader()
-            
-            # Transform the model
-            xformable = loader.transform(prim=prim, position=position, scale=scale)
+            prim_path = loader.load_usd_from_url(url, target_path)
             
             return {
                 "status": "success",
-                "message": f"Model at {prim_path} transformed successfully",
+                "prim_path": prim_path,
+                "message": f"Loaded USD from: {url}"
+            }
+        except Exception as e:
+            traceback.print_exc()
+            return {"status": "error", "message": str(e)}
+    
+    def transform(self, prim_path, position=(0, 0, 50), scale=(10, 10, 10)):
+        """Transform a USD prim."""
+        try:
+            stage = omni.usd.get_context().get_stage()
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim:
+                return {"status": "error", "message": f"Prim not found: {prim_path}"}
+            
+            loader = USDLoader()
+            loader.transform(prim=prim, position=position, scale=scale)
+            
+            return {
+                "status": "success",
+                "message": f"Transformed {prim_path}",
                 "position": position,
                 "scale": scale
             }
         except Exception as e:
-            print(f"Error transforming model: {str(e)}")
             traceback.print_exc()
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
