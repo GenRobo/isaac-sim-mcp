@@ -20,6 +20,37 @@ The MCP Server and its extension leverage the Model Context Protocol (MCP) frame
 
 ---
 
+## Launch Scripts
+
+Pre-configured scripts are provided to launch Isaac Sim with the MCP extension:
+
+| Platform | Script | Usage |
+|----------|--------|-------|
+| **Windows** | `launch_isaac_mcp.bat` | Double-click or run from PowerShell |
+| **Linux** | `launch_isaac_mcp.sh` | Run with `./launch_isaac_mcp.sh` |
+
+### Configuration
+
+Before first use, edit the script to set your Isaac Sim installation path:
+
+**Windows** (`launch_isaac_mcp.bat`):
+```batch
+set ISAAC_SIM_ROOT=D:\github\IsaacSim\_build\windows-x86_64\release
+```
+
+**Linux** (`launch_isaac_mcp.sh`):
+```bash
+export ISAAC_SIM_ROOT=~/.local/share/ov/pkg/isaac-sim-5.1.0
+./launch_isaac_mcp.sh
+```
+
+Common Isaac Sim locations:
+- **Windows (source build):** `D:\github\IsaacSim\_build\windows-x86_64\release`
+- **Windows (Omniverse):** `C:\Users\USERNAME\AppData\Local\ov\pkg\isaac-sim-5.1.0`
+- **Linux (Omniverse):** `~/.local/share/ov/pkg/isaac-sim-5.1.0`
+
+---
+
 ## Quick Start (Windows)
 
 ### 1. Clone the Repository
