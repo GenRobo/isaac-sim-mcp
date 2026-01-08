@@ -359,6 +359,27 @@ class MCPExtension(omni.ext.IExt):
             # For any other object, convert to string representation
             return str(obj)
         
+        def make_ascii_safe(text):
+            """Convert text to ASCII-safe string, replacing problematic characters."""
+            if not isinstance(text, str):
+                return str(text)
+            # Replace common unicode symbols with ASCII equivalents
+            replacements = {
+                '\u2713': '[OK]',    # checkmark
+                '\u2714': '[OK]',    # heavy checkmark
+                '\u2717': '[X]',     # ballot x
+                '\u2718': '[X]',     # heavy ballot x
+                '\u2192': '->',      # right arrow
+                '\u2190': '<-',      # left arrow
+                '\u2022': '*',       # bullet
+                '\u25cf': '*',       # black circle
+            }
+            for unicode_char, ascii_char in replacements.items():
+                text = text.replace(unicode_char, ascii_char)
+            # Encode to ASCII, replacing any remaining problematic chars
+            return text.encode('ascii', errors='replace').decode('ascii')
+        
+        old_stdout = None
         try:
             # Capture stdout
             old_stdout = sys.stdout
@@ -375,11 +396,37 @@ class MCPExtension(omni.ext.IExt):
             local_ns["Sdf"] = Sdf
             local_ns["Gf"] = Gf
             
+            # Add helper functions for safe prim access
+            def safe_get_prim(path):
+                """Safely get a prim, returns None if not found or invalid."""
+                stage = omni.usd.get_context().get_stage()
+                if not stage:
+                    return None
+                prim = stage.GetPrimAtPath(path)
+                if prim and prim.IsValid():
+                    return prim
+                return None
+            
+            def safe_traverse(root_path):
+                """Safely traverse prims under a path, skipping invalid ones."""
+                stage = omni.usd.get_context().get_stage()
+                if not stage:
+                    return
+                root = stage.GetPrimAtPath(root_path)
+                if not root or not root.IsValid():
+                    return
+                for prim in Usd.PrimRange(root):
+                    if prim.IsValid():
+                        yield prim
+            
+            local_ns["safe_get_prim"] = safe_get_prim
+            local_ns["safe_traverse"] = safe_traverse
+            
             # Execute the script
             exec(code, local_ns)
             
-            # Get captured output
-            output = captured_output.getvalue()
+            # Get captured output - make it ASCII safe
+            output = make_ascii_safe(captured_output.getvalue())
             sys.stdout = old_stdout
             
             # Get the result if set in script - make it JSON safe
@@ -394,14 +441,17 @@ class MCPExtension(omni.ext.IExt):
             }
         except Exception as e:
             # Restore stdout on error
-            sys.stdout = old_stdout if 'old_stdout' in dir() else sys.stdout
-            carb.log_error(f"Error executing script: {e}")
+            if old_stdout is not None:
+                sys.stdout = old_stdout
+            error_msg = make_ascii_safe(str(e))
+            carb.log_error(f"Error executing script: {error_msg}")
             import traceback
-            carb.log_error(traceback.format_exc())
+            tb = make_ascii_safe(traceback.format_exc())
+            carb.log_error(tb)
             return {
                 "status": "error",
-                "message": str(e),
-                "traceback": traceback.format_exc()
+                "message": error_msg,
+                "traceback": tb
             }
         
     def get_scene_info(self):
