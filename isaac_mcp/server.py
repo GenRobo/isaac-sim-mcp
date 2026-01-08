@@ -73,11 +73,11 @@ class IsaacConnection:
             finally:
                 self.sock = None
 
-    def receive_full_response(self, sock, buffer_size=16384):
+    def receive_full_response(self, sock, buffer_size=16384, timeout=60.0):
         """Receive the complete response, potentially in multiple chunks"""
         chunks = []
-        # Use a consistent timeout value that matches the addon's timeout
-        sock.settimeout(300.0)  # Match the extension's timeout
+        # Use a reasonable timeout - 60 seconds for most commands
+        sock.settimeout(timeout)
         
         try:
             while True:
@@ -131,7 +131,7 @@ class IsaacConnection:
         else:
             raise Exception("No data received")
 
-    def send_command(self, command_type: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    def send_command(self, command_type: str, params: Dict[str, Any] = None, timeout: float = 60.0) -> Dict[str, Any]:
         """Send a command to Isaac and return the response"""
         if not self.sock and not self.connect():
             raise ConnectionError("Not connected to Isaac")
@@ -143,17 +143,17 @@ class IsaacConnection:
         
         try:
             # Log the command being sent
-            logger.info(f"Sending command: {command_type} with params: {params}")
+            logger.info(f"Sending command: {command_type}")
             
             # Send the command
             self.sock.sendall(json.dumps(command).encode('utf-8'))
-            logger.info(f"Command sent, waiting for response...")
+            logger.info(f"Command sent, waiting for response (timeout={timeout}s)...")
             
-            # Set a timeout for receiving - use the same timeout as in receive_full_response
-            self.sock.settimeout(300.0)  # Match the extension's timeout
+            # Set a timeout for receiving
+            self.sock.settimeout(timeout)
             
-            # Receive the response using the improved receive_full_response method
-            response_data = self.receive_full_response(self.sock)
+            # Receive the response
+            response_data = self.receive_full_response(self.sock, timeout=timeout)
             logger.info(f"Received {len(response_data)} bytes of data")
             
             response = json.loads(response_data.decode('utf-8'))
@@ -227,11 +227,24 @@ _isaac_connection = None
 
 def get_isaac_connection():
     """Get or create a persistent Isaac connection"""
-    global _isaac_connection, _polyhaven_enabled  # Add _polyhaven_enabled to globals
+    global _isaac_connection
     
-    # If we have an existing connection, check if it's still valid
-    if _isaac_connection is not None:
+    # If we have an existing connection, verify it's still alive
+    if _isaac_connection is not None and _isaac_connection.sock is not None:
         try:
+            # Check if socket is still connected by peeking
+            _isaac_connection.sock.setblocking(False)
+            try:
+                # Try to peek at the socket - if it fails, connection is dead
+                _isaac_connection.sock.recv(1, socket.MSG_PEEK)
+            except BlockingIOError:
+                # No data available but socket is alive - this is expected
+                pass
+            except (ConnectionError, OSError):
+                # Socket is dead
+                raise Exception("Socket disconnected")
+            finally:
+                _isaac_connection.sock.setblocking(True)
             
             return _isaac_connection
         except Exception as e:
