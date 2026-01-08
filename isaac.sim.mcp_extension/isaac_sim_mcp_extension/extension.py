@@ -467,11 +467,11 @@ class MCPExtension(omni.ext.IExt):
         return {"status": "success", "message": "pong", "assets_root_path": assets_root_path}
     
     def simulation_control(self, action: str = "status", frames: int = 60):
-        """Control simulation playback without blocking.
+        """Control simulation playback.
         
         Args:
             action: "play", "stop", "pause", "step", or "status"
-            frames: Number of frames to step (only for "step" action)
+            frames: Number of frames to step (only for "step" action, max 60)
         
         Returns:
             Dictionary with simulation state
@@ -488,31 +488,24 @@ class MCPExtension(omni.ext.IExt):
             if action == "play":
                 timeline.play()
                 result["message"] = "Simulation started"
-                result["is_playing"] = True
                 
             elif action == "stop":
                 timeline.stop()
                 result["message"] = "Simulation stopped"
-                result["is_playing"] = False
                 
             elif action == "pause":
                 timeline.pause()
                 result["message"] = "Simulation paused"
-                result["is_playing"] = False
                 
             elif action == "step":
-                # Step a limited number of frames (max 60 to avoid blocking)
+                # For stepping, just forward time on the timeline
+                # This avoids blocking the async event loop
                 frames = min(frames, 60)
-                app = omni.kit.app.get_app()
-                was_playing = timeline.is_playing()
-                if not was_playing:
-                    timeline.play()
-                for _ in range(frames):
-                    app.update()
-                if not was_playing:
-                    timeline.pause()
-                result["message"] = f"Stepped {frames} frames"
-                result["is_playing"] = timeline.is_playing()
+                current_time = timeline.get_current_time()
+                fps = timeline.get_time_codes_per_seconds()
+                new_time = current_time + (frames / fps)
+                timeline.set_current_time(new_time)
+                result["message"] = f"Advanced timeline by {frames} frames to {new_time:.2f}s"
                 
             elif action == "status":
                 result["message"] = "Current simulation status"
