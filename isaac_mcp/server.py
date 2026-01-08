@@ -272,23 +272,285 @@ def get_scene_info(ctx: Context) -> str:
         # return f"Error getting scene info: {str(e)}"
         return {"status": "error", "error": str(e), "message": "Error getting scene info"}
 
-# @mcp.tool()
-# def get_object_info(ctx: Context, object_name: str) -> str:
-#     """
-#     Get detailed information about a specific object in the Isaac scene.
-    
-#     Parameters:
-#     - object_name: The name of the object to get information about
-#     """
-#     try:
-#         isaac = get_isaac_connection()
-#         result = isaac.send_command("get_object_info", {"name": object_name})
+@mcp.tool()
+def list_robots(ctx: Context) -> str:
+    """
+    List all robots (articulation roots) in the current Isaac Sim scene.
+    Returns paths and basic info for each articulation found.
+    """
+    code = '''
+import omni.usd
+from pxr import UsdPhysics
+import json
+
+stage = omni.usd.get_context().get_stage()
+robots = []
+
+for prim in stage.Traverse():
+    if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+        robot_info = {
+            "path": str(prim.GetPath()),
+            "name": prim.GetName(),
+            "type": prim.GetTypeName()
+        }
         
-#         # Just return the JSON representation of what Isaac sent us
-#         return json.dumps(result, indent=2)
-#     except Exception as e:
-#         logger.error(f"Error getting object info from Isaac: {str(e)}")
-#         return f"Error getting object info: {str(e)}"
+        # Count joints under this articulation
+        joint_count = 0
+        rigid_body_count = 0
+        for child in stage.Traverse():
+            child_path = str(child.GetPath())
+            if child_path.startswith(str(prim.GetPath())):
+                if child.IsA(UsdPhysics.Joint):
+                    joint_count += 1
+                if child.HasAPI(UsdPhysics.RigidBodyAPI):
+                    rigid_body_count += 1
+        
+        robot_info["joint_count"] = joint_count
+        robot_info["rigid_body_count"] = rigid_body_count
+        robots.append(robot_info)
+
+result = json.dumps({"robots": robots, "count": len(robots)}, indent=2)
+print(result)
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Robots in scene:\n{output}"
+    except Exception as e:
+        logger.error(f"Error listing robots: {str(e)}")
+        return f"Error listing robots: {str(e)}"
+
+
+@mcp.tool()
+def get_articulation_info(ctx: Context, prim_path: str) -> str:
+    """
+    Get detailed articulation info for a robot: DOFs, joint names, limits, drives.
+    
+    Parameters:
+    - prim_path: USD path to the robot articulation root (e.g., "/World/spot" or "/spot")
+    """
+    code = f'''
+import omni.usd
+from pxr import UsdPhysics, Gf
+import json
+
+stage = omni.usd.get_context().get_stage()
+root_path = "{prim_path}"
+root_prim = stage.GetPrimAtPath(root_path)
+
+if not root_prim:
+    print(json.dumps({{"error": f"Prim not found: {{root_path}}"}}))
+else:
+    info = {{
+        "path": root_path,
+        "has_articulation": root_prim.HasAPI(UsdPhysics.ArticulationRootAPI),
+        "joints": [],
+        "rigid_bodies": []
+    }}
+    
+    # Get articulation settings if available
+    if root_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+        try:
+            from pxr import PhysxSchema
+            if root_prim.HasAPI(PhysxSchema.PhysxArticulationAPI):
+                physx = PhysxSchema.PhysxArticulationAPI(root_prim)
+                info["solver_position_iterations"] = physx.GetSolverPositionIterationCountAttr().Get()
+                info["solver_velocity_iterations"] = physx.GetSolverVelocityIterationCountAttr().Get()
+                info["enabled_self_collisions"] = physx.GetEnabledSelfCollisionsAttr().Get()
+        except:
+            pass
+    
+    # Find all joints
+    for prim in stage.Traverse():
+        prim_path_str = str(prim.GetPath())
+        if not prim_path_str.startswith(root_path):
+            continue
+            
+        if prim.IsA(UsdPhysics.Joint):
+            joint_info = {{
+                "path": prim_path_str,
+                "name": prim.GetName(),
+                "type": prim.GetTypeName()
+            }}
+            
+            # Get joint properties
+            joint = UsdPhysics.Joint(prim)
+            body0 = joint.GetBody0Rel().GetTargets()
+            body1 = joint.GetBody1Rel().GetTargets()
+            if body0:
+                joint_info["body0"] = str(body0[0])
+            if body1:
+                joint_info["body1"] = str(body1[0])
+            
+            # Get limits for revolute/prismatic
+            if prim.IsA(UsdPhysics.RevoluteJoint):
+                rev = UsdPhysics.RevoluteJoint(prim)
+                joint_info["lower_limit"] = rev.GetLowerLimitAttr().Get()
+                joint_info["upper_limit"] = rev.GetUpperLimitAttr().Get()
+                joint_info["axis"] = rev.GetAxisAttr().Get()
+            elif prim.IsA(UsdPhysics.PrismaticJoint):
+                pris = UsdPhysics.PrismaticJoint(prim)
+                joint_info["lower_limit"] = pris.GetLowerLimitAttr().Get()
+                joint_info["upper_limit"] = pris.GetUpperLimitAttr().Get()
+                joint_info["axis"] = pris.GetAxisAttr().Get()
+            
+            # Get drive info
+            for drive_type in ["angular", "linear"]:
+                try:
+                    drive = UsdPhysics.DriveAPI(prim, drive_type)
+                    if drive:
+                        stiffness = drive.GetStiffnessAttr().Get()
+                        damping = drive.GetDampingAttr().Get()
+                        if stiffness is not None or damping is not None:
+                            joint_info["drive_type"] = drive_type
+                            joint_info["stiffness"] = stiffness
+                            joint_info["damping"] = damping
+                            max_force = drive.GetMaxForceAttr().Get()
+                            if max_force:
+                                joint_info["max_force"] = max_force
+                            break
+                except:
+                    pass
+            
+            info["joints"].append(joint_info)
+        
+        # Count rigid bodies
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            body_info = {{"path": prim_path_str, "name": prim.GetName()}}
+            if prim.HasAPI(UsdPhysics.MassAPI):
+                mass_api = UsdPhysics.MassAPI(prim)
+                mass = mass_api.GetMassAttr().Get()
+                if mass:
+                    body_info["mass"] = mass
+            info["rigid_bodies"].append(body_info)
+    
+    info["joint_count"] = len(info["joints"])
+    info["rigid_body_count"] = len(info["rigid_bodies"])
+    print(json.dumps(info, indent=2, default=str))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Articulation info for {prim_path}:\n{output}"
+    except Exception as e:
+        logger.error(f"Error getting articulation info: {str(e)}")
+        return f"Error getting articulation info: {str(e)}"
+
+
+@mcp.tool()
+def get_joint_states(ctx: Context, prim_path: str) -> str:
+    """
+    Get current joint positions and velocities for a robot articulation.
+    
+    Parameters:
+    - prim_path: USD path to the robot articulation root (e.g., "/World/spot" or "/spot")
+    """
+    code = f'''
+import omni.usd
+from pxr import UsdPhysics
+import json
+
+try:
+    from omni.isaac.core.articulations import Articulation
+    from omni.isaac.core import World
+    
+    # Get or create world
+    my_world = World.instance()
+    if my_world is None:
+        my_world = World(stage_units_in_meters=1.0)
+    
+    art = Articulation("{prim_path}")
+    art.initialize()
+    
+    joint_names = art.dof_names
+    joint_positions = art.get_joint_positions().tolist() if art.get_joint_positions() is not None else []
+    joint_velocities = art.get_joint_velocities().tolist() if art.get_joint_velocities() is not None else []
+    
+    states = {{
+        "prim_path": "{prim_path}",
+        "num_dofs": art.num_dof,
+        "joint_names": list(joint_names) if joint_names else [],
+        "joint_positions": joint_positions,
+        "joint_velocities": joint_velocities
+    }}
+    
+    # Combine into per-joint info
+    joints = []
+    for i, name in enumerate(joint_names or []):
+        joint = {{"name": name}}
+        if i < len(joint_positions):
+            joint["position"] = joint_positions[i]
+        if i < len(joint_velocities):
+            joint["velocity"] = joint_velocities[i]
+        joints.append(joint)
+    states["joints"] = joints
+    
+    print(json.dumps(states, indent=2))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Joint states for {prim_path}:\n{output}"
+    except Exception as e:
+        logger.error(f"Error getting joint states: {str(e)}")
+        return f"Error getting joint states: {str(e)}"
+
+
+@mcp.tool()
+def set_joint_positions(ctx: Context, prim_path: str, positions: List[float], joint_indices: List[int] = None) -> str:
+    """
+    Set joint positions for a robot articulation.
+    
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - positions: List of joint position values
+    - joint_indices: Optional list of joint indices to set (if None, sets all joints)
+    """
+    indices_str = str(joint_indices) if joint_indices else "None"
+    positions_str = str(positions)
+    
+    code = f'''
+import json
+try:
+    from omni.isaac.core.articulations import Articulation
+    from omni.isaac.core import World
+    import numpy as np
+    
+    my_world = World.instance()
+    if my_world is None:
+        my_world = World(stage_units_in_meters=1.0)
+    
+    art = Articulation("{prim_path}")
+    art.initialize()
+    
+    positions = np.array({positions_str})
+    indices = {indices_str}
+    
+    if indices is not None:
+        art.set_joint_positions(positions, joint_indices=np.array(indices))
+    else:
+        art.set_joint_positions(positions)
+    
+    # Get new positions to confirm
+    new_positions = art.get_joint_positions().tolist()
+    print(json.dumps({{"success": True, "new_positions": new_positions}}))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Set joint positions result:\n{output}"
+    except Exception as e:
+        logger.error(f"Error setting joint positions: {str(e)}")
+        return f"Error setting joint positions: {str(e)}"
+
 
 @mcp.tool("create_physics_scene")
 def create_physics_scene(
