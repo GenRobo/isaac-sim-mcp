@@ -211,8 +211,17 @@ class MCPExtension(omni.ext.IExt):
                         async def execute_wrapper():
                             try:
                                 response = self.execute_command(command)
-                                response_json = json.dumps(response)
-                                print("response_json: ", response_json)
+                                # Safely serialize response, handling non-JSON-serializable objects
+                                try:
+                                    response_json = json.dumps(response)
+                                except (TypeError, ValueError) as json_err:
+                                    # Fallback: convert response to string representation
+                                    print(f"JSON serialization failed: {json_err}, using string fallback")
+                                    response_json = json.dumps({
+                                        "status": response.get("status", "success") if isinstance(response, dict) else "success",
+                                        "message": str(response)
+                                    })
+                                print("response_json: ", response_json[:500] if len(response_json) > 500 else response_json)
                                 try:
                                     client.sendall(response_json.encode('utf-8'))
                                 except:
@@ -337,6 +346,19 @@ class MCPExtension(omni.ext.IExt):
         import io
         import sys
         
+        def make_json_safe(obj):
+            """Convert object to JSON-serializable format."""
+            if obj is None:
+                return None
+            if isinstance(obj, (str, int, float, bool)):
+                return obj
+            if isinstance(obj, (list, tuple)):
+                return [make_json_safe(item) for item in obj]
+            if isinstance(obj, dict):
+                return {str(k): make_json_safe(v) for k, v in obj.items()}
+            # For any other object, convert to string representation
+            return str(obj)
+        
         try:
             # Capture stdout
             old_stdout = sys.stdout
@@ -360,8 +382,9 @@ class MCPExtension(omni.ext.IExt):
             output = captured_output.getvalue()
             sys.stdout = old_stdout
             
-            # Get the result if set in script
+            # Get the result if set in script - make it JSON safe
             result = local_ns.get("result", None)
+            result = make_json_safe(result)
             
             return {
                 "status": "success",
