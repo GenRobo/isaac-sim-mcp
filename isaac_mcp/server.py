@@ -551,6 +551,36 @@ except Exception as e:
         return f"Error setting joint positions: {str(e)}"
 
 
+@mcp.tool()
+def simulation_control(ctx: Context, action: str = "status", frames: int = 60) -> str:
+    """
+    Control Isaac Sim simulation playback.
+    
+    Parameters:
+    - action: One of "play", "stop", "pause", "step", or "status"
+    - frames: Number of frames to step (only for "step" action, max 60)
+    
+    Actions:
+    - play: Start the simulation
+    - stop: Stop and reset the simulation
+    - pause: Pause the simulation (can resume with play)
+    - step: Step forward by N frames (max 60 to avoid blocking)
+    - status: Get current simulation state
+    """
+    try:
+        isaac = get_isaac_connection()
+        result = isaac.send_command("simulation_control", {"action": action, "frames": frames})
+        
+        msg = result.get("message", "")
+        is_playing = result.get("is_playing", False)
+        current_time = result.get("current_time", 0)
+        
+        return f"Simulation {action}: {msg}\nPlaying: {is_playing}, Time: {current_time:.2f}s"
+    except Exception as e:
+        logger.error(f"Error controlling simulation: {str(e)}")
+        return f"Error controlling simulation: {str(e)}"
+
+
 @mcp.tool("create_physics_scene")
 def create_physics_scene(
     objects: List[Dict[str, Any]] = [],

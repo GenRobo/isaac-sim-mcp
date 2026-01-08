@@ -311,6 +311,7 @@ class MCPExtension(omni.ext.IExt):
             "generate_3d_from_text_or_image": self.generate_3d_from_text_or_image,
             "transform": self.transform,
             "search_3d_usd_by_text": self.search_3d_usd_by_text,
+            "simulation_control": self.simulation_control,
         }
         
         handler = handlers.get(cmd_type)
@@ -460,6 +461,70 @@ class MCPExtension(omni.ext.IExt):
         stage_path = self._stage.GetRootLayer().realPath
         assets_root_path = get_assets_root_path()
         return {"status": "success", "message": "pong", "assets_root_path": assets_root_path}
+    
+    def simulation_control(self, action: str = "status", frames: int = 60):
+        """Control simulation playback without blocking.
+        
+        Args:
+            action: "play", "stop", "pause", "step", or "status"
+            frames: Number of frames to step (only for "step" action)
+        
+        Returns:
+            Dictionary with simulation state
+        """
+        try:
+            import omni.timeline
+            timeline = omni.timeline.get_timeline_interface()
+            
+            result = {
+                "status": "success",
+                "action": action,
+            }
+            
+            if action == "play":
+                timeline.play()
+                result["message"] = "Simulation started"
+                result["is_playing"] = True
+                
+            elif action == "stop":
+                timeline.stop()
+                result["message"] = "Simulation stopped"
+                result["is_playing"] = False
+                
+            elif action == "pause":
+                timeline.pause()
+                result["message"] = "Simulation paused"
+                result["is_playing"] = False
+                
+            elif action == "step":
+                # Step a limited number of frames (max 60 to avoid blocking)
+                frames = min(frames, 60)
+                app = omni.kit.app.get_app()
+                was_playing = timeline.is_playing()
+                if not was_playing:
+                    timeline.play()
+                for _ in range(frames):
+                    app.update()
+                if not was_playing:
+                    timeline.pause()
+                result["message"] = f"Stepped {frames} frames"
+                result["is_playing"] = timeline.is_playing()
+                
+            elif action == "status":
+                result["message"] = "Current simulation status"
+                
+            else:
+                return {"status": "error", "message": f"Unknown action: {action}"}
+            
+            # Always include current state
+            result["is_playing"] = timeline.is_playing()
+            result["is_stopped"] = timeline.is_stopped()
+            result["current_time"] = timeline.get_current_time()
+            
+            return result
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
         
     def omini_kit_command(self,  command: str, prim_type: str) -> Dict[str, Any]:
         omni.kit.commands.execute(command, prim_type=prim_type)
