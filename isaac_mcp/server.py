@@ -29,9 +29,10 @@ import socket
 import json
 import asyncio
 import logging
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List
+from typing import AsyncIterator, Dict, Any, List, Optional
 import os
 from pathlib import Path
 import base64
@@ -47,31 +48,34 @@ class IsaacConnection:
     host: str
     port: int
     sock: socket.socket = None  # Changed from 'socket' to 'sock' to avoid naming conflict
+    command_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     
     def connect(self) -> bool:
         """Connect to the Isaac addon socket server"""
-        if self.sock:
-            return True
-            
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            logger.info(f"Connected to Isaac at {self.host}:{self.port}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Isaac: {str(e)}")
-            self.sock = None
-            return False
+        with self.command_lock:
+            if self.sock:
+                return True
+                
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.host, self.port))
+                logger.info(f"Connected to Isaac at {self.host}:{self.port}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to connect to Isaac: {str(e)}")
+                self.sock = None
+                return False
     
     def disconnect(self):
         """Disconnect from the Isaac addon"""
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception as e:
-                logger.error(f"Error disconnecting from Isaac: {str(e)}")
-            finally:
-                self.sock = None
+        with self.command_lock:
+            if self.sock:
+                try:
+                    self.sock.close()
+                except Exception as e:
+                    logger.error(f"Error disconnecting from Isaac: {str(e)}")
+                finally:
+                    self.sock = None
 
     def receive_full_response(self, sock, buffer_size=16384, timeout=60.0):
         """Receive the complete response, potentially in multiple chunks"""
@@ -133,58 +137,51 @@ class IsaacConnection:
 
     def send_command(self, command_type: str, params: Dict[str, Any] = None, timeout: float = 60.0) -> Dict[str, Any]:
         """Send a command to Isaac and return the response"""
-        if not self.sock and not self.connect():
-            raise ConnectionError("Not connected to Isaac")
-        
-        command = {
-            "type": command_type,
-            "params": params or {}
-        }
-        
-        try:
-            # Log the command being sent
-            logger.info(f"Sending command: {command_type}")
+        with self.command_lock:
+            if not self.sock and not self.connect():
+                raise ConnectionError("Not connected to Isaac")
             
-            # Send the command
-            self.sock.sendall(json.dumps(command).encode('utf-8'))
-            logger.info(f"Command sent, waiting for response (timeout={timeout}s)...")
+            command = {
+                "type": command_type,
+                "params": params or {}
+            }
             
-            # Set a timeout for receiving
-            self.sock.settimeout(timeout)
-            
-            # Receive the response
-            response_data = self.receive_full_response(self.sock, timeout=timeout)
-            logger.info(f"Received {len(response_data)} bytes of data")
-            
-            response = json.loads(response_data.decode('utf-8'))
-            logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
-            
-            if response.get("status") == "error":
-                logger.error(f"Isaac error: {response.get('message')}")
-                raise Exception(response.get("message", "Unknown error from Isaac"))
-            
-            return response.get("result", {})
-        except socket.timeout:
-            logger.error("Socket timeout while waiting for response from Isaac")
-            # Don't try to reconnect here - let the get_isaac_connection handle reconnection
-            # Just invalidate the current socket so it will be recreated next time
-            self.sock = None
-            raise Exception("Timeout waiting for Isaac response - try simplifying your request")
-        except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
-            logger.error(f"Socket connection error: {str(e)}")
-            self.sock = None
-            raise Exception(f"Connection to Isaac lost: {str(e)}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON response from Isaac: {str(e)}")
-            # Try to log what was received
-            if 'response_data' in locals() and response_data:
-                logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
-            raise Exception(f"Invalid response from Isaac: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error communicating with Isaac: {str(e)}")
-            # Don't try to reconnect here - let the get_isaac_connection handle reconnection
-            self.sock = None
-            raise Exception(f"Communication error with Isaac: {str(e)}")
+            try:
+                # Serialize command/response traffic on the shared socket.
+                logger.info(f"Sending command: {command_type}")
+                self.sock.sendall(json.dumps(command).encode('utf-8'))
+                logger.info(f"Command sent, waiting for response (timeout={timeout}s)...")
+                
+                self.sock.settimeout(timeout)
+                response_data = self.receive_full_response(self.sock, timeout=timeout)
+                logger.info(f"Received {len(response_data)} bytes of data")
+                
+                response = json.loads(response_data.decode('utf-8'))
+                logger.info(f"Response parsed, status: {response.get('status', 'unknown')}")
+                
+                if response.get("status") == "error":
+                    logger.error(f"Isaac error: {response.get('message')}")
+                    raise Exception(response.get("message", "Unknown error from Isaac"))
+                
+                return response.get("result", {})
+            except socket.timeout:
+                logger.error("Socket timeout while waiting for response from Isaac")
+                self.disconnect()
+                raise Exception("Timeout waiting for Isaac response - try simplifying your request")
+            except (ConnectionError, BrokenPipeError, ConnectionResetError) as e:
+                logger.error(f"Socket connection error: {str(e)}")
+                self.disconnect()
+                raise Exception(f"Connection to Isaac lost: {str(e)}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON response from Isaac: {str(e)}")
+                if 'response_data' in locals() and response_data:
+                    logger.error(f"Raw response (first 200 bytes): {response_data[:200]}")
+                self.disconnect()
+                raise Exception(f"Invalid response from Isaac: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error communicating with Isaac: {str(e)}")
+                self.disconnect()
+                raise Exception(f"Communication error with Isaac: {str(e)}")
 
 @asynccontextmanager
 async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
@@ -223,49 +220,28 @@ mcp = FastMCP("IsaacSimMCP")
 
 # Global connection for resources (since resources can't access context)
 _isaac_connection = None
+_isaac_connection_lock = threading.RLock()
 # _polyhaven_enabled = False  # Add this global variable
 
 def get_isaac_connection():
     """Get or create a persistent Isaac connection"""
     global _isaac_connection
-    
-    # If we have an existing connection, verify it's still alive
-    if _isaac_connection is not None and _isaac_connection.sock is not None:
-        try:
-            # Check if socket is still connected by peeking
-            _isaac_connection.sock.setblocking(False)
-            try:
-                # Try to peek at the socket - if it fails, connection is dead
-                _isaac_connection.sock.recv(1, socket.MSG_PEEK)
-            except BlockingIOError:
-                # No data available but socket is alive - this is expected
-                pass
-            except (ConnectionError, OSError):
-                # Socket is dead
-                raise Exception("Socket disconnected")
-            finally:
-                _isaac_connection.sock.setblocking(True)
-            
+    with _isaac_connection_lock:
+        # Reuse the existing connection and let send_command() handle reconnects
+        # under its command lock. Peeking the socket here can race with an active
+        # send/receive in another tool call.
+        if _isaac_connection is not None and _isaac_connection.sock is not None:
             return _isaac_connection
-        except Exception as e:
-            # Connection is dead, close it and create a new one
-            logger.warning(f"Existing connection is no longer valid: {str(e)}")
-            try:
-                _isaac_connection.disconnect()
-            except:
-                pass
-            _isaac_connection = None
-    
-    # Create a new connection if needed
-    if _isaac_connection is None:
-        _isaac_connection = IsaacConnection(host="localhost", port=8766)
-        if not _isaac_connection.connect():
-            logger.error("Failed to connect to Isaac")
-            _isaac_connection = None
-            raise Exception("Could not connect to Isaac. Make sure the Isaac addon is running.")
-        logger.info("Created new persistent connection to Isaac")
-    
-    return _isaac_connection
+        
+        if _isaac_connection is None:
+            _isaac_connection = IsaacConnection(host="localhost", port=8766)
+            if not _isaac_connection.connect():
+                logger.error("Failed to connect to Isaac")
+                _isaac_connection = None
+                raise Exception("Could not connect to Isaac. Make sure the Isaac addon is running.")
+            logger.info("Created new persistent connection to Isaac")
+        
+        return _isaac_connection
 
 
 @mcp.tool()
@@ -452,56 +428,81 @@ else:
 
 
 @mcp.tool()
-def get_joint_states(ctx: Context, prim_path: str) -> str:
+def get_joint_states(
+    ctx: Context,
+    prim_path: str,
+    driven_only: bool = False,
+    joint_names: Optional[List[str]] = None,
+) -> str:
     """
     Get current joint positions and velocities for a robot articulation.
     
     Parameters:
     - prim_path: USD path to the robot articulation root (e.g., "/World/spot" or "/spot")
+    - driven_only: If True, return only joints with a drive target attribute
+    - joint_names: Optional list of joint names to include
     """
+    joint_names_literal = repr(joint_names)
     code = f'''
 import omni.usd
-from pxr import UsdPhysics
 import json
 
-try:
-    from omni.isaac.core.articulations import Articulation
-    from omni.isaac.core import World
-    
-    # Get or create world
-    my_world = World.instance()
-    if my_world is None:
-        my_world = World(stage_units_in_meters=1.0)
-    
-    art = Articulation("{prim_path}")
-    art.initialize()
-    
-    joint_names = art.dof_names
-    joint_positions = art.get_joint_positions().tolist() if art.get_joint_positions() is not None else []
-    joint_velocities = art.get_joint_velocities().tolist() if art.get_joint_velocities() is not None else []
-    
-    states = {{
-        "prim_path": "{prim_path}",
-        "num_dofs": art.num_dof,
-        "joint_names": list(joint_names) if joint_names else [],
-        "joint_positions": joint_positions,
-        "joint_velocities": joint_velocities
-    }}
-    
-    # Combine into per-joint info
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+driven_only = {repr(driven_only)}
+requested_joint_names = set({joint_names_literal}) if {joint_names_literal} is not None else None
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
     joints = []
-    for i, name in enumerate(joint_names or []):
-        joint = {{"name": name}}
-        if i < len(joint_positions):
-            joint["position"] = joint_positions[i]
-        if i < len(joint_velocities):
-            joint["velocity"] = joint_velocities[i]
-        joints.append(joint)
-    states["joints"] = joints
-    
-    print(json.dumps(states, indent=2))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
+    joint_root = f"{{search_root}}/joints/"
+    for prim in stage.Traverse():
+        prim_path_str = str(prim.GetPath())
+        if not prim_path_str.startswith(joint_root):
+            continue
+
+        target_attr = prim.GetAttribute("drive:angular:physics:targetPosition")
+        position_attr = prim.GetAttribute("state:angular:physics:position")
+        velocity_attr = prim.GetAttribute("state:angular:physics:velocity")
+        index_attr = prim.GetAttribute("isaac:physics:index")
+        driven = target_attr.IsValid()
+
+        if requested_joint_names is not None and prim.GetName() not in requested_joint_names:
+            continue
+
+        has_state = position_attr.IsValid() or velocity_attr.IsValid()
+        has_control = driven or index_attr.IsValid()
+        if not (has_state or has_control):
+            continue
+        if driven_only and not driven:
+            continue
+
+        index_value = index_attr.Get() if index_attr.IsValid() else None
+        joints.append({{
+            "name": prim.GetName(),
+            "path": prim_path_str,
+            "index": index_value,
+            "driven": driven,
+            "position": position_attr.Get() if position_attr.IsValid() else None,
+            "velocity": velocity_attr.Get() if velocity_attr.IsValid() else None,
+            "target_position": target_attr.Get() if driven else None,
+        }})
+
+    joints.sort(key=lambda joint: (joint["index"] is None, joint["index"] if joint["index"] is not None else 10**9, joint["name"]))
+
+    result = {{
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "driven_only": driven_only,
+        "num_dofs": len(joints),
+        "joint_names": [joint["name"] for joint in joints],
+        "joint_positions": [joint["position"] for joint in joints],
+        "joint_velocities": [joint["velocity"] for joint in joints],
+        "joints": joints,
+    }}
+    print(json.dumps(result, indent=2))
 '''
     try:
         isaac = get_isaac_connection()
@@ -527,32 +528,63 @@ def set_joint_positions(ctx: Context, prim_path: str, positions: List[float], jo
     positions_str = str(positions)
     
     code = f'''
+import omni.usd
 import json
-try:
-    from omni.isaac.core.articulations import Articulation
-    from omni.isaac.core import World
-    import numpy as np
-    
-    my_world = World.instance()
-    if my_world is None:
-        my_world = World(stage_units_in_meters=1.0)
-    
-    art = Articulation("{prim_path}")
-    art.initialize()
-    
-    positions = np.array({positions_str})
-    indices = {indices_str}
-    
-    if indices is not None:
-        art.set_joint_positions(positions, joint_indices=np.array(indices))
-    else:
-        art.set_joint_positions(positions)
-    
-    # Get new positions to confirm
-    new_positions = art.get_joint_positions().tolist()
-    print(json.dumps({{"success": True, "new_positions": new_positions}}))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+positions = {positions_str}
+indices = {indices_str}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    joints = []
+    joint_root = f"{{search_root}}/joints/"
+    for prim in stage.Traverse():
+        prim_path_str = str(prim.GetPath())
+        if not prim_path_str.startswith(joint_root):
+            continue
+
+        target_attr = prim.GetAttribute("drive:angular:physics:targetPosition")
+        index_attr = prim.GetAttribute("isaac:physics:index")
+        if not target_attr.IsValid():
+            continue
+
+        index_value = index_attr.Get() if index_attr.IsValid() else None
+        joints.append({{
+            "name": prim.GetName(),
+            "path": prim_path_str,
+            "index": index_value,
+            "target_attr": target_attr,
+        }})
+
+    joints.sort(key=lambda joint: (joint["index"] is None, joint["index"] if joint["index"] is not None else 10**9, joint["name"]))
+
+    selected = list(range(len(joints))) if indices is None else list(indices)
+    if len(selected) != len(positions):
+        raise ValueError(f"Expected {{len(selected)}} positions, received {{len(positions)}}")
+
+    updates = []
+    for requested_index, target_value in zip(selected, positions):
+        if requested_index < 0 or requested_index >= len(joints):
+            raise IndexError(f"Joint index out of range: {{requested_index}}")
+        joint = joints[requested_index]
+        joint["target_attr"].Set(float(target_value))
+        updates.append({{
+            "index": requested_index,
+            "name": joint["name"],
+            "target_position": joint["target_attr"].Get(),
+        }})
+
+    print(json.dumps({{
+        "success": True,
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "updated_joints": updates,
+        "joint_order": [joint["name"] for joint in joints],
+    }}, indent=2))
 '''
     try:
         isaac = get_isaac_connection()
@@ -562,6 +594,351 @@ except Exception as e:
     except Exception as e:
         logger.error(f"Error setting joint positions: {str(e)}")
         return f"Error setting joint positions: {str(e)}"
+
+
+@mcp.tool()
+def get_joint_attributes(
+    ctx: Context,
+    prim_path: str,
+    joint_names: Optional[List[str]] = None,
+    attribute_names: Optional[List[str]] = None,
+    driven_only: bool = False,
+) -> str:
+    """
+    Get raw USD attributes for robot joints.
+
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - joint_names: Optional list of joint names to include
+    - attribute_names: Optional list of attribute names to read
+    - driven_only: If True, return only joints with drive target attributes
+    """
+    joint_names_literal = repr(joint_names)
+    attribute_names_literal = repr(
+        attribute_names or [
+            "drive:angular:physics:targetPosition",
+            "drive:angular:physics:stiffness",
+            "drive:angular:physics:damping",
+            "drive:angular:physics:maxForce",
+            "physics:lowerLimit",
+            "physics:upperLimit",
+            "physics:excludeFromArticulation",
+            "physxJoint:jointFriction",
+            "state:angular:physics:position",
+            "state:angular:physics:velocity",
+        ]
+    )
+    code = f'''
+import omni.usd
+import json
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+requested_joint_names = set({joint_names_literal}) if {joint_names_literal} is not None else None
+attribute_names = {attribute_names_literal}
+driven_only = {repr(driven_only)}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    rows = []
+    joint_root = f"{{search_root}}/joints/"
+    for prim in stage.Traverse():
+        prim_path_str = str(prim.GetPath())
+        if not prim_path_str.startswith(joint_root):
+            continue
+
+        name = prim.GetName()
+        if requested_joint_names is not None and name not in requested_joint_names:
+            continue
+
+        target_attr = prim.GetAttribute("drive:angular:physics:targetPosition")
+        driven = target_attr.IsValid()
+        if driven_only and not driven:
+            continue
+
+        attrs = {{}}
+        for attr_name in attribute_names:
+            attr = prim.GetAttribute(attr_name)
+            attrs[attr_name] = attr.Get() if attr.IsValid() else None
+
+        rows.append({{
+            "name": name,
+            "path": prim_path_str,
+            "driven": driven,
+            "attributes": attrs,
+        }})
+
+    rows.sort(key=lambda row: row["name"])
+    print(json.dumps({{
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "driven_only": driven_only,
+        "attribute_names": attribute_names,
+        "joints": rows,
+    }}, indent=2))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Joint attributes for {prim_path}:\n{output}"
+    except Exception as e:
+        logger.error(f"Error getting joint attributes: {str(e)}")
+        return f"Error getting joint attributes: {str(e)}"
+
+
+@mcp.tool()
+def set_joint_targets_by_name(ctx: Context, prim_path: str, targets: Dict[str, float]) -> str:
+    """
+    Set drive target positions by joint name.
+
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - targets: Mapping of joint name to target position in degrees
+    """
+    targets_literal = repr(targets)
+    code = f'''
+import omni.usd
+import json
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+targets = {targets_literal}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    updates = []
+    for joint_name, target_value in targets.items():
+        prim = stage.GetPrimAtPath(f"{{search_root}}/joints/{{joint_name}}")
+        if not prim.IsValid():
+            raise ValueError(f"Joint not found: {{joint_name}}")
+        attr = prim.GetAttribute("drive:angular:physics:targetPosition")
+        if not attr.IsValid():
+            raise ValueError(f"Joint has no drive target attribute: {{joint_name}}")
+        attr.Set(float(target_value))
+        updates.append({{
+            "name": joint_name,
+            "target_position": attr.Get(),
+        }})
+
+    print(json.dumps({{
+        "success": True,
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "updated_joints": updates,
+    }}, indent=2))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Set joint targets result:\n{output}"
+    except Exception as e:
+        logger.error(f"Error setting joint targets by name: {str(e)}")
+        return f"Error setting joint targets by name: {str(e)}"
+
+
+@mcp.tool()
+def set_joint_drive_params(
+    ctx: Context,
+    prim_path: str,
+    joint_names: List[str],
+    stiffness: Optional[float] = None,
+    damping: Optional[float] = None,
+    max_force: Optional[float] = None,
+) -> str:
+    """
+    Set drive parameters for named joints.
+
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - joint_names: List of joint names to update
+    - stiffness: Optional drive stiffness to apply
+    - damping: Optional drive damping to apply
+    - max_force: Optional drive max force to apply
+    """
+    joint_names_literal = repr(joint_names)
+    code = f'''
+import omni.usd
+import json
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+joint_names = {joint_names_literal}
+stiffness = {repr(stiffness)}
+damping = {repr(damping)}
+max_force = {repr(max_force)}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    updates = []
+    for joint_name in joint_names:
+        prim = stage.GetPrimAtPath(f"{{search_root}}/joints/{{joint_name}}")
+        if not prim.IsValid():
+            raise ValueError(f"Joint not found: {{joint_name}}")
+
+        result = {{"name": joint_name}}
+        if stiffness is not None:
+            attr = prim.GetAttribute("drive:angular:physics:stiffness")
+            if not attr.IsValid():
+                raise ValueError(f"Joint has no stiffness attribute: {{joint_name}}")
+            attr.Set(float(stiffness))
+            result["stiffness"] = attr.Get()
+        if damping is not None:
+            attr = prim.GetAttribute("drive:angular:physics:damping")
+            if not attr.IsValid():
+                raise ValueError(f"Joint has no damping attribute: {{joint_name}}")
+            attr.Set(float(damping))
+            result["damping"] = attr.Get()
+        if max_force is not None:
+            attr = prim.GetAttribute("drive:angular:physics:maxForce")
+            if not attr.IsValid():
+                raise ValueError(f"Joint has no maxForce attribute: {{joint_name}}")
+            attr.Set(float(max_force))
+            result["max_force"] = attr.Get()
+
+        updates.append(result)
+
+    print(json.dumps({{
+        "success": True,
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "updated_joints": updates,
+    }}, indent=2))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Set joint drive params result:\n{output}"
+    except Exception as e:
+        logger.error(f"Error setting joint drive params: {str(e)}")
+        return f"Error setting joint drive params: {str(e)}"
+
+
+@mcp.tool()
+def set_joint_limits(ctx: Context, prim_path: str, limits: Dict[str, Dict[str, float]]) -> str:
+    """
+    Set lower and upper limits for named joints.
+
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - limits: Mapping of joint name to {"lower": value, "upper": value}
+    """
+    limits_literal = repr(limits)
+    code = f'''
+import omni.usd
+import json
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+limits = {limits_literal}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    updates = []
+    for joint_name, limit_cfg in limits.items():
+        prim = stage.GetPrimAtPath(f"{{search_root}}/joints/{{joint_name}}")
+        if not prim.IsValid():
+            raise ValueError(f"Joint not found: {{joint_name}}")
+
+        result = {{"name": joint_name}}
+        if "lower" in limit_cfg:
+            attr = prim.GetAttribute("physics:lowerLimit")
+            if not attr.IsValid():
+                raise ValueError(f"Joint has no lower limit attribute: {{joint_name}}")
+            attr.Set(float(limit_cfg["lower"]))
+            result["lower"] = attr.Get()
+        if "upper" in limit_cfg:
+            attr = prim.GetAttribute("physics:upperLimit")
+            if not attr.IsValid():
+                raise ValueError(f"Joint has no upper limit attribute: {{joint_name}}")
+            attr.Set(float(limit_cfg["upper"]))
+            result["upper"] = attr.Get()
+
+        updates.append(result)
+
+    print(json.dumps({{
+        "success": True,
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "updated_joints": updates,
+    }}, indent=2))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Set joint limits result:\n{output}"
+    except Exception as e:
+        logger.error(f"Error setting joint limits: {str(e)}")
+        return f"Error setting joint limits: {str(e)}"
+
+
+@mcp.tool()
+def set_joint_attributes(
+    ctx: Context,
+    prim_path: str,
+    updates: Dict[str, Dict[str, Any]],
+) -> str:
+    """
+    Set arbitrary USD joint attributes for named joints.
+
+    Parameters:
+    - prim_path: USD path to the robot articulation root
+    - updates: Mapping of joint name to attribute/value mapping
+    """
+    updates_literal = repr(updates)
+    code = f'''
+import omni.usd
+import json
+
+stage = omni.usd.get_context().get_stage()
+requested_path = "{prim_path}"
+search_root = requested_path.removesuffix("/root_joint")
+updates = {updates_literal}
+
+if not stage or not stage.GetPrimAtPath(search_root).IsValid():
+    print(json.dumps({{"error": f"Prim not found: {{requested_path}}"}}))
+else:
+    applied = []
+    for joint_name, attr_updates in updates.items():
+        prim = stage.GetPrimAtPath(f"{{search_root}}/joints/{{joint_name}}")
+        if not prim.IsValid():
+            raise ValueError(f"Joint not found: {{joint_name}}")
+
+        result = {{"name": joint_name, "attributes": {{}}}}
+        for attr_name, attr_value in attr_updates.items():
+            attr = prim.GetAttribute(attr_name)
+            if not attr.IsValid():
+                raise ValueError(f"Joint attribute not found: {{joint_name}}.{{attr_name}}")
+            attr.Set(attr_value)
+            result["attributes"][attr_name] = attr.Get()
+        applied.append(result)
+
+    print(json.dumps({{
+        "success": True,
+        "prim_path": requested_path,
+        "search_root": search_root,
+        "updated_joints": applied,
+    }}, indent=2))
+'''
+    try:
+        isaac = get_isaac_connection()
+        response = isaac.send_command("execute_script", {"code": code})
+        output = response.get("output", "")
+        return f"Set joint attributes result:\n{output}"
+    except Exception as e:
+        logger.error(f"Error setting joint attributes: {str(e)}")
+        return f"Error setting joint attributes: {str(e)}"
 
 
 @mcp.tool()
@@ -1153,6 +1530,14 @@ def transform(
     except Exception as e:
         logger.error(f"Error transforming model: {str(e)}")
         return f"Error transforming model: {str(e)}"
+
+_SERVER_DIR = Path(__file__).resolve().parent
+if str(_SERVER_DIR) not in os.sys.path:
+    os.sys.path.insert(0, str(_SERVER_DIR))
+
+from lab_tools import register as register_lab_tools
+
+register_lab_tools(mcp, get_isaac_connection, logger)
 
 # Main execution
 

@@ -42,10 +42,23 @@ import omni.kit.commands
 import omni.physx as _physx
 import omni.timeline
 from typing import Dict, Any, List, Optional, Union
-from omni.isaac.nucleus import get_assets_root_path
-from omni.isaac.core.prims import XFormPrim
 import numpy as np
-from omni.isaac.core import World
+
+try:
+    from omni.isaac.nucleus import get_assets_root_path
+except ImportError:
+    def get_assets_root_path():
+        return None
+
+try:
+    from omni.isaac.core.prims import XFormPrim
+except ImportError:
+    XFormPrim = None
+
+try:
+    from omni.isaac.core import World
+except ImportError:
+    World = None
 
 # Import Beaver3d and USDLoader
 from isaac_sim_mcp_extension.gen3d import Beaver3d
@@ -72,6 +85,7 @@ class MCPExtension(omni.ext.IExt):
         self._status_label = None
         self._server_thread = None
         self._models = None
+        self._lab_handlers = None
         self._settings = carb.settings.get_settings()
         self._image_url_cache = {}
         self._text_prompt_cache = {}
@@ -322,6 +336,7 @@ class MCPExtension(omni.ext.IExt):
             "simulation_control": self.simulation_control,
             "capture_logs": self.capture_logs,
         }
+        handlers.update(self._get_lab_handlers())
         
         handler = handlers.get(cmd_type)
         if handler:
@@ -340,6 +355,19 @@ class MCPExtension(omni.ext.IExt):
                 return {"status": "error", "message": str(e)}
         else:
             return {"status": "error", "message": f"Unknown command type: {cmd_type}"}
+
+    def _get_lab_handlers(self):
+        """Lazily load Isaac Lab handlers so base extension import stays compatible."""
+        if self._lab_handlers is not None:
+            return self._lab_handlers
+        try:
+            from isaac_sim_mcp_extension.lab_commands import get_lab_handlers
+
+            self._lab_handlers = get_lab_handlers(self)
+        except Exception as exc:
+            print(f"[MCP] Isaac Lab handlers unavailable: {exc}")
+            self._lab_handlers = {}
+        return self._lab_handlers
 
     def execute_script(self, code: str):
         """Execute a Python script within the Isaac Sim context."""
@@ -560,6 +588,11 @@ class MCPExtension(omni.ext.IExt):
 
         stage = omni.usd.get_context().get_stage()
         assets_root_path = get_assets_root_path()
+        if assets_root_path is None or XFormPrim is None:
+            return {
+                "status": "error",
+                "message": "create_robot requires Isaac Sim core asset helpers that are unavailable in this runtime",
+            }
         
         robot_configs = {
             "franka": ("/Isaac/Robots/Franka/franka_alt_fingers.usd", "/Franka"),
