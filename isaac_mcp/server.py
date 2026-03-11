@@ -206,11 +206,15 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         yield {}
     finally:
         # Clean up the global connection on shutdown
-        global _isaac_connection
+        global _isaac_connection, _lab_connection
         if _isaac_connection:
             logger.info("Disconnecting from Isaac Sim on shutdown")
             _isaac_connection.disconnect()
             _isaac_connection = None
+        if _lab_connection:
+            logger.info("Disconnecting from Isaac Lab runtime bridge on shutdown")
+            _lab_connection.disconnect()
+            _lab_connection = None
         logger.info("Isaac SimMCP server shut down")
 
 # Create the MCP server
@@ -221,6 +225,8 @@ mcp = FastMCP("IsaacSimMCP")
 # Global connection for resources (since resources can't access context)
 _isaac_connection = None
 _isaac_connection_lock = threading.RLock()
+_lab_connection = None
+_lab_connection_lock = threading.RLock()
 # _polyhaven_enabled = False  # Add this global variable
 
 def get_isaac_connection():
@@ -242,6 +248,24 @@ def get_isaac_connection():
             logger.info("Created new persistent connection to Isaac")
         
         return _isaac_connection
+
+
+def get_lab_connection():
+    """Get or create a persistent project-owned Isaac Lab runtime connection."""
+    global _lab_connection
+    with _lab_connection_lock:
+        if _lab_connection is not None and _lab_connection.sock is not None:
+            return _lab_connection
+
+        if _lab_connection is None:
+            _lab_connection = IsaacConnection(host="127.0.0.1", port=8767)
+            if not _lab_connection.connect():
+                logger.error("Failed to connect to Isaac Lab runtime bridge")
+                _lab_connection = None
+                raise Exception("Could not connect to Isaac Lab runtime bridge. Make sure the Lab script is running.")
+            logger.info("Created new persistent connection to Isaac Lab runtime bridge")
+
+        return _lab_connection
 
 
 @mcp.tool()
@@ -1537,7 +1561,7 @@ if str(_SERVER_DIR) not in os.sys.path:
 
 from lab_tools import register as register_lab_tools
 
-register_lab_tools(mcp, get_isaac_connection, logger)
+register_lab_tools(mcp, get_lab_connection, logger)
 
 # Main execution
 

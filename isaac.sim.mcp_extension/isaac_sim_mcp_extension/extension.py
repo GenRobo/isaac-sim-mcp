@@ -85,7 +85,6 @@ class MCPExtension(omni.ext.IExt):
         self._status_label = None
         self._server_thread = None
         self._models = None
-        self._lab_handlers = None
         self._settings = carb.settings.get_settings()
         self._image_url_cache = {}
         self._text_prompt_cache = {}
@@ -130,23 +129,35 @@ class MCPExtension(omni.ext.IExt):
     
     def _on_update(self, event):
         """Process commands during the update cycle - runs on main thread."""
-        if self._processing_command:
-            return  # Already processing, skip
-        
         try:
-            # Process ONE command per frame to avoid blocking
-            if not self._command_queue.empty():
-                self._processing_command = True
-                try:
-                    client, command = self._command_queue.get_nowait()
-                    self._process_command(client, command)
-                except queue.Empty:
-                    pass
-                finally:
-                    self._processing_command = False
+            self.process_pending_commands(max_commands=1)
         except Exception as e:
             print(f"[MCP] Error in update loop: {e}")
             self._processing_command = False
+
+    def process_pending_commands(self, max_commands: int = 1) -> int:
+        """Process queued commands on the current thread.
+
+        This is used both by the Kit update callback and by standalone Isaac Lab
+        loops that need to explicitly service queued MCP requests while stepping.
+        """
+        if self._processing_command:
+            return 0
+
+        processed = 0
+        self._processing_command = True
+        try:
+            while processed < max_commands:
+                try:
+                    client, command = self._command_queue.get_nowait()
+                except queue.Empty:
+                    break
+                self._process_command(client, command)
+                processed += 1
+        finally:
+            self._processing_command = False
+
+        return processed
     
     def _process_command(self, client, command):
         """Process a single command and send response."""
@@ -336,7 +347,6 @@ class MCPExtension(omni.ext.IExt):
             "simulation_control": self.simulation_control,
             "capture_logs": self.capture_logs,
         }
-        handlers.update(self._get_lab_handlers())
         
         handler = handlers.get(cmd_type)
         if handler:
@@ -355,19 +365,6 @@ class MCPExtension(omni.ext.IExt):
                 return {"status": "error", "message": str(e)}
         else:
             return {"status": "error", "message": f"Unknown command type: {cmd_type}"}
-
-    def _get_lab_handlers(self):
-        """Lazily load Isaac Lab handlers so base extension import stays compatible."""
-        if self._lab_handlers is not None:
-            return self._lab_handlers
-        try:
-            from isaac_sim_mcp_extension.lab_commands import get_lab_handlers
-
-            self._lab_handlers = get_lab_handlers(self)
-        except Exception as exc:
-            print(f"[MCP] Isaac Lab handlers unavailable: {exc}")
-            self._lab_handlers = {}
-        return self._lab_handlers
 
     def execute_script(self, code: str):
         """Execute a Python script within the Isaac Sim context."""
