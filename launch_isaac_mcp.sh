@@ -17,31 +17,35 @@ ISAAC_SIM_ROOT="${ISAAC_SIM_ROOT:-$DEFAULT_ISAAC_SIM}"
 # Path to this MCP extension folder (auto-detected from script location)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_EXT_FOLDER="$SCRIPT_DIR"
+
+# Detect launch mode: Omniverse Launcher (isaac-sim.sh) vs pip-installed (isaacsim entrypoint)
+LAUNCHER_SH="$ISAAC_SIM_ROOT/isaac-sim.sh"
+PIP_ISAACSIM="$(command -v isaacsim 2>/dev/null || true)"
 # ---------------------
 
 echo "========================================"
 echo " Isaac Sim MCP Launcher"
 echo "========================================"
 echo ""
-echo "Isaac Sim:     $ISAAC_SIM_ROOT"
 echo "MCP Extension: $MCP_EXT_FOLDER"
-echo ""
 
-# Check if Isaac Sim exists
-if [ ! -f "$ISAAC_SIM_ROOT/isaac-sim.sh" ]; then
-    echo "ERROR: Isaac Sim not found at: $ISAAC_SIM_ROOT"
+if [ -f "$LAUNCHER_SH" ]; then
+    MODE="launcher"
+    echo "Isaac Sim:     $ISAAC_SIM_ROOT (Omniverse Launcher install)"
+elif [ -n "$PIP_ISAACSIM" ]; then
+    MODE="pip"
+    echo "Isaac Sim:     $PIP_ISAACSIM (pip-installed in current Python env)"
+else
     echo ""
-    echo "Please set ISAAC_SIM_ROOT environment variable or update this script."
+    echo "ERROR: Could not find Isaac Sim."
+    echo "  - Looked for Launcher install at: $LAUNCHER_SH"
+    echo "  - Looked for pip entrypoint 'isaacsim' on PATH (activate the conda env that has it)"
     echo ""
-    echo "Common locations:"
-    echo "  - Omniverse Launcher: ~/.local/share/ov/pkg/isaac-sim-5.1.0"
-    echo "  - Built from source:  /path/to/IsaacSim/_build/linux-x86_64/release"
-    echo ""
-    echo "Example:"
-    echo "  export ISAAC_SIM_ROOT=/path/to/isaac-sim"
-    echo "  ./launch_isaac_mcp.sh"
+    echo "Either set ISAAC_SIM_ROOT to an Omniverse Launcher install, or activate"
+    echo "a Python env where 'pip show isaacsim' succeeds."
     exit 1
 fi
+echo ""
 
 # Check if MCP extension exists
 if [ ! -d "$MCP_EXT_FOLDER/isaac.sim.mcp_extension" ]; then
@@ -49,14 +53,14 @@ if [ ! -d "$MCP_EXT_FOLDER/isaac.sim.mcp_extension" ]; then
     exit 1
 fi
 
-# Launch Isaac Sim with MCP extension
 echo "Starting Isaac Sim with MCP extension..."
-echo ""
-echo "Command: isaac-sim.sh --ext-folder \"$MCP_EXT_FOLDER\" --enable isaac.sim.mcp_extension"
-echo ""
 echo "Once Isaac Sim loads, look for:"
 echo "  \"Isaac Sim MCP server started on localhost:8766\""
 echo ""
 
-cd "$ISAAC_SIM_ROOT"
-./isaac-sim.sh --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
+if [ "$MODE" = "launcher" ]; then
+    cd "$ISAAC_SIM_ROOT"
+    ./isaac-sim.sh --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
+else
+    exec isaacsim --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
+fi
