@@ -59,8 +59,8 @@ echo "  \"Isaac Sim MCP server started on localhost:8766\""
 echo ""
 
 if [ "$MODE" = "launcher" ]; then
-    cd "$ISAAC_SIM_ROOT"
+    cd "$ISAAC_SIM_ROOT" || exit 1
     ./isaac-sim.sh --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
 else
-    exec isaacsim --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
+    exec "$PIP_ISAACSIM" --ext-folder "$MCP_EXT_FOLDER" --enable isaac.sim.mcp_extension "$@"
 fi
