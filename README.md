@@ -14,7 +14,7 @@ The MCP Server and its extension leverage the Model Context Protocol (MCP) frame
 
 ## Requirements
 
-- **NVIDIA Isaac Sim 5.x** (tested with 5.1) or Isaac Sim 4.2.0+
+- **NVIDIA Isaac Sim 6.0** (tested with 6.0.0-rc.59); for Isaac Sim 4.2–5.1 use commit `0bb9c07` or earlier
 - Python 3.10+
 - Cursor AI editor for MCP integration
 

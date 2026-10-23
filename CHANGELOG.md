@@ -5,6 +5,19 @@ All notable changes to the isaac-sim-mcp project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Ported the Kit extension to Isaac Sim 6.0: removed `omni.isaac.*` imports/dependencies in favor of `isaacsim.core.experimental.*` and `isaacsim.storage.native`
+- `launch_isaac_mcp.bat` honors an `ISAAC_SIM_ROOT` already set by the caller
+- `create_physics_scene` builds prims with `pxr` UsdGeom/UsdPhysics in meters, Z-up: gravity is applied, objects get collision, rigid body, mass and display color, and the floor is a collision plane
+
+### Fixed
+- `create_robot` uses the Isaac Sim 6.0 asset paths for Franka, Jetbot and Carter
+- `create_physics_scene` MCP tool no longer fails output validation (declared `dict`, returned `str`)
+- `get_scene_info` returns a clear error instead of an empty `AssertionError` when no stage is open yet
+- `launch_isaac_mcp.bat` calls `isaac-sim.bat` by full path so it works when `NoDefaultCurrentDirectoryInExePath` is set
+
 
 ## [0.3.0] - 2024-04-22
 

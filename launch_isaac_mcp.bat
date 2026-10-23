@@ -5,9 +5,9 @@ setlocal
 :: Starts Isaac Sim with the MCP extension enabled
 
 :: --- Configuration ---
-:: Set this to your Isaac Sim installation directory
+:: Set this to your Isaac Sim installation directory (an ISAAC_SIM_ROOT set by the caller wins)
 :: For Isaac Sim 5.x built from source:
-set ISAAC_SIM_ROOT=D:\github\IsaacSim\_build\windows-x86_64\release
+if not defined ISAAC_SIM_ROOT set ISAAC_SIM_ROOT=D:\github\IsaacSim\_build\windows-x86_64\release
 
 :: For Isaac Sim installed via Omniverse Launcher (uncomment and modify):
 :: set ISAAC_SIM_ROOT=C:\Users\%USERNAME%\AppData\Local\ov\pkg\isaac-sim-5.1.0
@@ -57,6 +57,7 @@ echo   "Isaac Sim MCP server started on localhost:8766"
 echo.
 
 cd /d "%ISAAC_SIM_ROOT%"
-call isaac-sim.bat --ext-folder "%MCP_EXT_FOLDER%" --enable isaac.sim.mcp_extension %*
+:: Full path: a bare name fails when NoDefaultCurrentDirectoryInExePath is set
+call "%ISAAC_SIM_ROOT%\isaac-sim.bat" --ext-folder "%MCP_EXT_FOLDER%" --enable isaac.sim.mcp_extension %*
 
 endlocal

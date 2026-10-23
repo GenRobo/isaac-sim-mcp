@@ -274,7 +274,7 @@ def get_scene_info(ctx: Context) -> str:
     try:
         isaac = get_isaac_connection()
         result = isaac.send_command("get_scene_info")
-        print("result: ", result)
+        logger.debug("get_scene_info result: %s", result)
         
         # Just return the JSON representation of what Isaac sent us
         return json.dumps(result, indent=2)
@@ -1050,20 +1050,23 @@ def capture_logs(ctx: Context, action: str = "get", clear: bool = False, filter_
 def create_physics_scene(
     objects: List[Dict[str, Any]] = [],
     floor: bool = True,
-    gravity: List[float] = [0,  -0.981, 0],
+    gravity: List[float] = [0, 0, -9.81],
     scene_name: str = "physics_scene"
-) -> Dict[str, Any]:
+) -> str:
     """Create a physics scene with multiple objects. Before create physics scene, you need to call get_scene_info() first to verify availability of connection.
-    
+    Units are stage units (meters in Isaac Sim 6) and the stage is Z-up.
+
     Args:
-        objects: List of objects to create. Each object should have at least 'type' and 'position'. 
+        objects: List of objects to create. Each object should have at least 'type' and 'position'.
+            type: Cube | Sphere | Cylinder | Cone. Optional keys: size (Cube), radius, height,
+            rotation as quaternion [w, x, y, z], scale, color [r, g, b, a], mass, physics_enabled, is_kinematic.
         objects  = [
-        {"path": "/World/Cube", "type": "Cube", "size": 20, "position": [0, 100, 0]},
-        {"path": "/World/Sphere", "type": "Sphere", "radius": 5, "position": [5, 200, 0]},
-        {"path": "/World/Cone", "type": "Cone", "height": 8, "radius": 3, "position": [-5, 150, 0]}
+        {"path": "/World/Cube", "type": "Cube", "size": 0.2, "position": [0, 0, 1.0]},
+        {"path": "/World/Sphere", "type": "Sphere", "radius": 0.05, "position": [0.5, 0, 2.0]},
+        {"path": "/World/Cone", "type": "Cone", "height": 0.08, "radius": 0.03, "position": [-0.5, 0, 1.5]}
          ]
         floor: Whether to create a floor. deafult is True
-        gravity: The gravity vector. Default is [0, 0, -981.0] (cm/s^2).
+        gravity: The gravity vector. Default is [0, 0, -9.81] (m/s^2).
         scene_name: The name of the scene. deafult is "physics_scene"
         
     Returns:
@@ -1191,10 +1194,10 @@ simulation_context.stop()
     try:
         # Get the global connection
         isaac = get_isaac_connection()
-        print("code: ", code)
+        logger.debug("execute_script code length: %s", len(code))
         
         result = isaac.send_command("execute_script", {"code": code})
-        print("result: ", result)
+        logger.debug("execute_script result: %s", result)
         return f"Script executed. Result: {result}"
     except Exception as e:
         logger.error(f"Error executing code: {str(e)}")
