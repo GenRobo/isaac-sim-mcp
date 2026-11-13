@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A stdlib-only Windows launch supervisor with a 600-second default deadline, a 12288 MiB total-used-VRAM cap per GPU, configurable positive finite limits/reserve, bounded monitoring queries, and fail-closed process/GPU preflight.
+- Atomic Windows Job Object ownership, kill-on-close tree cleanup, and a machine-wide single-launch mutex. Timeout, VRAM pressure, monitoring failure, Ctrl+C, early launcher exit, and guard termination stop only the owned process tree.
+- CPU-only regression tests and a harmless Windows Python-process smoke harness for real job ownership, tree termination, and lock behavior; neither launches Isaac nor queries the GPU.
+
 ### Changed
+- `launch_isaac_mcp.bat` now always invokes the attached supervisor, preserves `ISAAC_SIM_ROOT` and application arguments/MCP flags, and selects standard PhysX (`isaac-sim.bat`) or Newton (`isaac-sim.newton.bat`) through separate guard configuration. Python selection supports executable overrides, ProgramData Miniconda, and normal `py`/`python` resolution.
+- Windows launch documentation removes the routine unguarded manual path and explains reserve/capacity checks, argument restrictions, forced shutdown, and limitations against abrupt OOM or hardware failure. The Linux launcher remains unchanged and unguarded.
+- The Kit extension no longer depends on `omni.physx`, so it also loads in the Newton-physics app (`isaac-sim.newton.bat`)
 - Ported the Kit extension to Isaac Sim 6.0: removed `omni.isaac.*` imports/dependencies in favor of `isaacsim.core.experimental.*` and `isaacsim.storage.native`
 - `launch_isaac_mcp.bat` honors an `ISAAC_SIM_ROOT` already set by the caller
 - `create_physics_scene` builds prims with `pxr` UsdGeom/UsdPhysics in meters, Z-up: gravity is applied, objects get collision, rigid body, mass and display color, and the floor is a collision plane

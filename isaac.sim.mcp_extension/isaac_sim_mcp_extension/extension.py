@@ -39,7 +39,6 @@ from pxr import Usd, UsdGeom, UsdPhysics, Sdf, Gf
 
 import omni
 import omni.kit.commands
-import omni.physx as _physx
 import omni.timeline
 from typing import Dict, Any, List, Optional, Union
 import numpy as np
@@ -67,7 +66,6 @@ class MCPExtension(omni.ext.IExt):
         self.socket = None
         self.server_thread = None
         self._usd_context = None
-        self._physx_interface = None
         self._timeline = None
         self._window = None
         self._status_label = None

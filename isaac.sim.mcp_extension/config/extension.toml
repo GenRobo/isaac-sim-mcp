@@ -10,7 +10,6 @@ keywords = ["mcp", "server", "socket", "simulation", "robotics"]
 "omni.kit.uiapp" = {}
 "omni.usd" = {}
 "omni.timeline" = {}
-"omni.physx" = {}
 "isaacsim.core.experimental.prims" = {}
 "isaacsim.core.experimental.utils" = {}
 "isaacsim.storage.native" = {}
