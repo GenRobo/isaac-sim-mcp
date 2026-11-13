@@ -30,8 +30,9 @@ The scripts need the extension's external-driver mode (`update()` advances a Kit
 play cannot happen inside Kit's update event. Measured on Isaac Sim 6.2 / T4 (2026-11-13): Replicator's default camera
 clipping hides a 0.3 m prop from under a metre, so cameras get an explicit range; editing a stage while Kit's loaders
 still run is a USD threading violation, so the drop test builds its own stage and references the asset last; the
-experimental Newton bridge diverges for colliders offset from the body origin, which the drop test reports as
-`diverged` rather than a verdict.
+experimental Newton bridge diverges for colliders offset from the body origin at its default 500 Hz physics rate
+(and at 30, 240 and 600 Hz) but settles at 60 and 120 Hz, so the drop test sets an explicit rate (default 120 Hz) and
+reports a non-finite pose as `diverged` rather than a verdict.
 
 No module here imports Kit: it is importable by any client (the FastMCP server, a stdio bridge) and by tests.
 """
@@ -134,6 +135,7 @@ import omni.timeline
 import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from isaacsim.core.prims import RigidPrim
+from isaacsim.core.simulation_manager import SimulationManager
 update()
 # Measure the asset with plain USD first: Kit's loaders run on other threads once a stage is open in the context,
 # and editing a stage while they run is a USD threading violation. The scene is therefore built in a fresh stage
@@ -190,6 +192,11 @@ for _ in range(5):
 bodies = [p.GetPath().pathString for p in Usd.PrimRange(stage.GetPrimAtPath("/World/asset")) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
 if not bodies:
     raise RuntimeError("The referenced asset exposes no rigid body")
+# Explicit physics rate. Measured on Isaac Sim 6.2 / T4 (2026-11-13): the Newton bridge's default dt is 0.002 s
+# (500 Hz), at which any body with colliders offset from its origin diverges (NaN) on first contact; it settles
+# at 60 and 120 Hz and diverges again at 30, 240 and 600 Hz. 120 Hz settles cleanest.
+physics_dt = 1.0 / gr_args.get("physicsHz", 120)
+SimulationManager.set_physics_dt(physics_dt)
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 update()
@@ -229,7 +236,7 @@ for i, body in enumerate(bodies):
                    "driftLastHalfSecond": None if diverged else round(drift, 6), "atRest": not diverged and drift < 0.001,
                    "endLowestEstimate": None if diverged else round(lowest, 4), "belowGround": not diverged and lowest < -0.02})
 result = {"path": gr_args["path"], "engine": "newton", "simulatedSeconds": round(simulated, 3), "updates": updates,
-          "wallSeconds": round(time.time() - wall, 2),
+          "wallSeconds": round(time.time() - wall, 2), "physicsDt": physics_dt,
           "dropHeight": drop, "bodies": report,
           "verdict": "diverged" if any(b["diverged"] for b in report)
           else "pass" if all(b["atRest"] and not b["belowGround"] for b in report)

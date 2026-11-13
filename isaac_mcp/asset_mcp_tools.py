@@ -51,10 +51,11 @@ def register(mcp, get_isaac_connection, logger) -> None:
             return f"Error: {e}"
 
     @mcp.tool()
-    def asset_simulate(ctx, path: str, seconds: float = 3.0, drop_height: float = 0.0, timeout_seconds: int = 900) -> str:
-        """Drop a metres/Z-up rigid-body asset onto a ground plane under the active physics engine and report rest, penetration or divergence."""
+    def asset_simulate(ctx, path: str, seconds: float = 3.0, drop_height: float = 0.0, physics_hz: int = 120,
+                       timeout_seconds: int = 900) -> str:
+        """Drop a metres/Z-up rigid-body asset onto a ground plane at an explicit physics rate (default 120 Hz; the Newton bridge's 500 Hz default diverges for off-origin colliders) and report rest, penetration or divergence."""
         try:
-            return run("simulate", {"path": path, "seconds": seconds, "dropHeight": drop_height}, timeout_seconds)
+            return run("simulate", {"path": path, "seconds": seconds, "dropHeight": drop_height, "physicsHz": physics_hz}, timeout_seconds)
         except Exception as e:
             logger.error(f"asset_simulate: {e}")
             return f"Error: {e}"
