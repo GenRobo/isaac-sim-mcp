@@ -190,7 +190,8 @@ if not bodies:
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 update()
-# Newton writes poses to Fabric, not USD: read through the physics tensor view.
+# While the simulation plays, state is read only through the physics API (the RigidPrim tensor view): Newton and
+# PhysX write poses to Fabric, and raw USD xform reads would return the authored start pose.
 view = RigidPrim(bodies)
 positions, orientations = view.get_world_poses()
 start = [[float(v) for v in positions[i]] + [float(v) for v in orientations[i]] for i in range(len(bodies))]
