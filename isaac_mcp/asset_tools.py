@@ -30,9 +30,9 @@ The scripts need the extension's external-driver mode (`update()` advances a Kit
 play cannot happen inside Kit's update event. Measured on Isaac Sim 6.2 / T4 (2026-11-13): Replicator's default camera
 clipping hides a 0.3 m prop from under a metre, so cameras get an explicit range; editing a stage while Kit's loaders
 still run is a USD threading violation, so the drop test builds its own stage and references the asset last; the
-experimental Newton bridge diverges for colliders offset from the body origin at its default 500 Hz physics rate
-(and at 30, 240 and 600 Hz) but settles at 60 and 120 Hz, so the drop test sets an explicit rate (default 120 Hz) and
-reports a non-finite pose as `diverged` rather than a verdict.
+Newton 1.6.1 convex pipeline accepts a nonlocal contact witness against a large box floor
+(newton-physics/newton#5036), which drove SolverMuJoCo to NaN at the first contact of any body with colliders offset
+from its origin; the drop test therefore uses a plane floor, and still reports a non-finite pose as `diverged`.
 
 No module here imports Kit: it is importable by any client (the FastMCP server, a stdio bridge) and by tests.
 """
@@ -172,9 +172,13 @@ stage.SetDefaultPrim(world.GetPrim())
 scene = UsdPhysics.Scene.Define(stage, Sdf.Path("/World/PhysicsScene"))
 scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0, 0, -1))
 scene.CreateGravityMagnitudeAttr().Set(9.81)
-ground = UsdGeom.Cube.Define(stage, Sdf.Path("/World/Ground"))
-ground.AddTranslateOp().Set(Gf.Vec3d(0, 0, -0.5))
-ground.AddScaleOp().Set(Gf.Vec3f(20, 20, 0.5))
+# The floor is a plane, never a large or thin box: Newton 1.6.1's convex pipeline can accept a nonlocal contact
+# witness against a large box floor (newton-physics/newton#5036), which drove SolverMuJoCo to NaN on first contact
+# for every body with colliders offset from its origin (Isaac Sim 6.2 / T4, 2026-11-13).
+ground = UsdGeom.Plane.Define(stage, Sdf.Path("/World/Ground"))
+ground.CreateAxisAttr().Set("Z")
+ground.CreateWidthAttr().Set(10.0)
+ground.CreateLengthAttr().Set(10.0)
 UsdPhysics.CollisionAPI.Apply(ground.GetPrim())
 drop = gr_args.get("dropHeight", 0.0)
 # The asset's lowest render point starts `drop` metres above the ground; the asset keeps its own transforms.
@@ -192,11 +196,10 @@ for _ in range(5):
 bodies = [p.GetPath().pathString for p in Usd.PrimRange(stage.GetPrimAtPath("/World/asset")) if p.HasAPI(UsdPhysics.RigidBodyAPI)]
 if not bodies:
     raise RuntimeError("The referenced asset exposes no rigid body")
-# Explicit physics rate. Measured on Isaac Sim 6.2 / T4 (2026-11-13): the Newton bridge's default dt is 0.002 s
-# (500 Hz), at which any body with colliders offset from its origin diverges (NaN) on first contact; it settles
-# at 60 and 120 Hz and diverges again at 30, 240 and 600 Hz. 120 Hz settles cleanest.
-physics_dt = 1.0 / gr_args.get("physicsHz", 120)
-SimulationManager.set_physics_dt(physics_dt)
+# Isaac's physics rate (0.002 s in 6.2) unless the caller asks for another one.
+if gr_args.get("physicsHz"):
+    SimulationManager.set_physics_dt(1.0 / gr_args["physicsHz"])
+physics_dt = SimulationManager.get_physics_dt()
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 update()
