@@ -31,6 +31,7 @@ trailing newline is whitespace to them.
 """
 import io
 import json
+import math
 import time
 
 MAX_STREAM = 64 * 1024
@@ -64,16 +65,27 @@ class BoundedWriter(io.TextIOBase):
         return "".join(self.parts) + suffix
 
 
+def _sanitise(value):
+    """Per-element conversion: non-finite floats become None, unknown objects their repr."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitise(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitise(v) for v in value]
+    return repr(value)
+
+
 def json_safe(value, limit=MAX_RESULT):
-    """A JSON-encodable copy of `value` (repr for anything else) whose serialisation stays under `limit`."""
-    try:
-        text = json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
-        text = repr(value)
-        return text[:limit] + ("..." if len(text) > limit else "")
+    """A JSON-encodable copy of `value` (non-finite floats as null, unknown objects as their repr, element by
+    element) whose serialisation stays under `limit`; over the limit, the truncated text is returned instead."""
+    safe = _sanitise(value)
+    text = json.dumps(safe)
     if len(text) > limit:
         return text[:limit] + f"...[result truncated at {limit} characters]"
-    return json.loads(text)
+    return safe
 
 
 def expired(command, now=None):

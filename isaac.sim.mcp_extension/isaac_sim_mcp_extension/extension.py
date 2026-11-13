@@ -92,6 +92,7 @@ class MCPExtension(omni.ext.IExt):
         self._update_sub = None
         self._processing_command = False
         self._external_driver = False
+        self._current_deadline = None
         
 
     def on_startup(self, ext_id: str):
@@ -173,7 +174,11 @@ class MCPExtension(omni.ext.IExt):
                 # The caller gave up waiting (its deadline passed while earlier commands ran): never run it late.
                 response = {"status": "error", "message": "deadline passed before execution; the command was not run"}
             else:
-                response = self.execute_command(command)
+                self._current_deadline = command.get("deadline") if isinstance(command, dict) else None
+                try:
+                    response = self.execute_command(command)
+                finally:
+                    self._current_deadline = None
             payload = protocol.frame(response)
 
             # Log truncated response
@@ -349,7 +354,10 @@ class MCPExtension(omni.ext.IExt):
                 if result and result.get("status") == "success":   
                     return {"status": "success", "result": result}
                 else:
-                    return {"status": "error", "message": result.get("message", "Unknown error")}
+                    # Keep what the handler reported beside the message (execute_script: traceback, output, stderr).
+                    error = {"status": "error", "message": result.get("message", "Unknown error")}
+                    error.update({k: v for k, v in result.items() if k not in ("status", "message")})
+                    return error
             except Exception as e:
                 print(f"[MCP] Error in handler {cmd_type}: {e}")
                 traceback.print_exc()
@@ -399,6 +407,9 @@ class MCPExtension(omni.ext.IExt):
             if not self._external_driver:
                 raise RuntimeError("update() is only available when the command queue is driven externally; "
                                    "this script already runs inside Kit's update")
+            if protocol.expired({"deadline": self._current_deadline}):
+                # The caller gave up: a frame loop (stage load, play, render) stops at its next frame.
+                raise TimeoutError("the command's deadline passed; the caller is no longer waiting")
             omni.kit.app.get_app().update()
 
         local_ns["safe_get_prim"] = safe_get_prim
@@ -414,8 +425,9 @@ class MCPExtension(omni.ext.IExt):
                 "output": stdout.getvalue(),
                 "stderr": stderr.getvalue(),
             }
-        except Exception as e:
-            error_msg = str(e)[:4000]
+        except BaseException as e:  # SystemExit/KeyboardInterrupt from a script must not take Kit down
+            kind = "SessionInterrupted" if isinstance(e, (SystemExit, KeyboardInterrupt)) else type(e).__name__
+            error_msg = (f"{kind}: " if kind == "SessionInterrupted" else "") + str(e)[:4000]
             carb.log_error(f"[MCP] Script error: {error_msg}")
             return {
                 "status": "error",

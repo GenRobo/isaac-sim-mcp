@@ -41,6 +41,8 @@ STAGE_OPEN = r'''
 import omni.usd
 import omni.timeline
 from pxr import UsdGeom, UsdPhysics
+# Fails here, before touching the user's timeline or stage, when the extension is not driven externally.
+update()
 ctx = omni.usd.get_context()
 # Settle whatever the previous script left running and let Kit tear the old stage down before opening another:
 # a reopen while Replicator still edits the old layer is a USD threading violation.
@@ -132,6 +134,7 @@ import omni.timeline
 import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 from isaacsim.core.prims import RigidPrim
+update()
 # Measure the asset with plain USD first: Kit's loaders run on other threads once a stage is open in the context,
 # and editing a stage while they run is a USD threading violation. The scene is therefore built in a fresh stage
 # before the asset is referenced into it, and nothing is edited afterwards.

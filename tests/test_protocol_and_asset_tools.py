@@ -33,8 +33,10 @@ class ProtocolTests(unittest.TestCase):
 
     def test_json_safe_bounds_results_and_falls_back_to_repr(self):
         self.assertEqual(protocol.json_safe({"a": [1, 2.5, None, True]}), {"a": [1, 2.5, None, True]})
-        self.assertEqual(protocol.json_safe(float("nan")), "nan")
-        self.assertIsInstance(protocol.json_safe(set([1])), str)
+        self.assertIsNone(protocol.json_safe(float("nan")))
+        self.assertEqual(protocol.json_safe({"a": float("inf"), "b": (1, 2)}), {"a": None, "b": [1, 2]})
+        self.assertEqual(protocol.json_safe(set([1])), [1])
+        self.assertIn("object", protocol.json_safe({"o": object()})["o"])
         big = protocol.json_safe(list(range(100000)), limit=1000)
         self.assertIsInstance(big, str)
         self.assertLess(len(big), 1100)
