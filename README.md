@@ -268,6 +268,17 @@ Replace `YOUR_USERNAME` with your actual username, or use absolute paths.
 | `execute_script_file` | Execute a .py file from disk |
 | `omni_kit_command` | Execute an Omniverse Kit command |
 
+### Asset Tools (headless host required)
+
+| Tool | Description |
+|------|-------------|
+| `asset_stage_open` | Open a USD stage and report units, default prim, prim count, rigid bodies, world bounds |
+| `asset_validate` | NVIDIA's asset validator (`isaacsim.asset.validation` rules) on a stage |
+| `asset_render` | RTX frames of a stage (dome + distant light, explicit clipping range) into a directory |
+| `asset_simulate` | Drop a metres/Z-up rigid-body asset onto a ground plane; verdict `pass`, `moving`, `penetrated` or `diverged` |
+
+These run as `execute_script` templates (`isaac_mcp/asset_tools.py`) that advance frames with the `update()` helper, which exists only when the extension is driven externally: a headless `SimulationApp` host enables the extension, calls `MCPExtension.instance.drive_externally()` and services `process_pending_commands()` between its own `app.update()` calls. In the default interactive mode (commands run inside Kit's update event) these tools refuse to run.
+
 ### 3D Generation (Optional - requires API keys)
 
 | Tool | Description |

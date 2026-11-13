@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Asset tools (`asset_stage_open`, `asset_validate`, `asset_render`, `asset_simulate`) as FastMCP tools and as reusable `execute_script` templates in `isaac_mcp/asset_tools.py`: stage inspection, NVIDIA's asset validator, RTX renders with an explicit camera clipping range, and a drop test that builds its own stage and references the asset last (editing a freshly opened stage while Kit's loaders run is a USD threading violation). The drop test reports `diverged` for a non-finite pose; measured on Isaac Sim 6.2, the experimental Newton bridge diverges for colliders offset from the body origin.
+- Extension external-driver mode: `MCPExtension.instance`, `drive_externally()` and the public `process_pending_commands()` let a headless `SimulationApp` host service the command queue between its own `app.update()` calls; scripts then get an `update()` helper to advance frames (refused in the default update-event mode, where it would re-enter Kit's update).
+- Request deadlines: a command carrying `deadline` (Unix seconds) that the extension only reaches afterwards is refused, never run late; the FastMCP client sends its timeout as the deadline.
+- `isaac_sim_mcp_extension/protocol.py`: Kit-free protocol helpers (bounded output, JSON-safe results, framing, deadlines, request buffering) with tests in `tests/test_protocol_and_asset_tools.py`.
+
+### Changed
+- `execute_script` captures stdout and stderr per execution (bounded to 64 KiB each, UTF-8 kept) instead of swapping the process-wide `sys.stdout` and ASCII-mangling the output; `result` is bounded to 256 KiB of JSON; errors carry a bounded traceback and the captured output.
+- Responses are newline-terminated JSON (whitespace to older clients); the listen backlog is 8; an oversized request buffer is dropped through the protocol helper.
 - A stdlib-only Windows launch supervisor with a 600-second default deadline, a 12288 MiB total-used-VRAM cap per GPU, configurable positive finite limits/reserve, bounded monitoring queries, and fail-closed process/GPU preflight.
 - Atomic Windows Job Object ownership, kill-on-close tree cleanup, and a machine-wide single-launch mutex. Timeout, VRAM pressure, monitoring failure, Ctrl+C, early launcher exit, and guard termination stop only the owned process tree.
 - CPU-only regression tests and a harmless Windows Python-process smoke harness for real job ownership, tree termination, and lock behavior; neither launches Isaac nor queries the GPU.

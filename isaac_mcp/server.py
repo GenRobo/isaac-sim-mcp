@@ -143,7 +143,9 @@ class IsaacConnection:
             
             command = {
                 "type": command_type,
-                "params": params or {}
+                "params": params or {},
+                # The extension refuses a command it only reaches after this: a timed-out call never runs late.
+                "deadline": time.time() + timeout,
             }
             
             try:
@@ -1563,8 +1565,10 @@ if str(_SERVER_DIR) not in os.sys.path:
     os.sys.path.insert(0, str(_SERVER_DIR))
 
 from lab_tools import register as register_lab_tools
+from asset_mcp_tools import register as register_asset_tools
 
 register_lab_tools(mcp, get_lab_connection, logger)
+register_asset_tools(mcp, get_isaac_connection, logger)
 
 # Main execution
 

@@ -51,11 +51,20 @@ from isaacsim.storage.native import get_assets_root_path
 from isaac_sim_mcp_extension.gen3d import Beaver3d
 from isaac_sim_mcp_extension.usd import USDLoader
 from isaac_sim_mcp_extension.usd import USDSearch3d
+from isaac_sim_mcp_extension import protocol
 
 
 class MCPExtension(omni.ext.IExt):
-    """MCP Extension with queue-based command processing for stability."""
-    
+    """MCP Extension with queue-based command processing for stability.
+
+    Commands arrive on a socket thread and run on Kit's main thread: by default from the update event, or, in
+    external-driver mode (`drive_externally()`), from a loop that owns `app.update()` itself (a headless
+    SimulationApp host). In that mode a script may advance frames with the `update()` helper, which would
+    re-enter Kit's update loop in the default mode and is therefore refused there.
+    """
+
+    instance = None
+
     def __init__(self) -> None:
         """Initialize the extension."""
         super().__init__()
@@ -82,6 +91,7 @@ class MCPExtension(omni.ext.IExt):
         self._command_queue = queue.Queue()
         self._update_sub = None
         self._processing_command = False
+        self._external_driver = False
         
 
     def on_startup(self, ext_id: str):
@@ -100,10 +110,21 @@ class MCPExtension(omni.ext.IExt):
         )
         
         self._start()
-    
+        MCPExtension.instance = self
+
+    def drive_externally(self):
+        """Stop servicing the queue from Kit's update event; the caller services it with process_pending_commands()
+        between its own app.update() calls. Returns self for chaining."""
+        self._update_sub = None
+        self._external_driver = True
+        print("[MCP] Command queue is driven externally")
+        return self
+
     def on_shutdown(self):
         """Clean up on shutdown."""
         print(f"[MCP] Shutting down extension: {self.ext_id}")
+        if MCPExtension.instance is self:
+            MCPExtension.instance = None
         
         # Unsubscribe from update events
         if self._update_sub:
@@ -148,34 +169,28 @@ class MCPExtension(omni.ext.IExt):
     def _process_command(self, client, command):
         """Process a single command and send response."""
         try:
-            response = self.execute_command(command)
-            
-            # Safely serialize response
-            try:
-                response_json = json.dumps(response)
-            except (TypeError, ValueError) as json_err:
-                print(f"[MCP] JSON serialization failed: {json_err}")
-                response_json = json.dumps({
-                    "status": response.get("status", "success") if isinstance(response, dict) else "success",
-                    "message": str(response)
-                })
-            
+            if protocol.expired(command):
+                # The caller gave up waiting (its deadline passed while earlier commands ran): never run it late.
+                response = {"status": "error", "message": "deadline passed before execution; the command was not run"}
+            else:
+                response = self.execute_command(command)
+            payload = protocol.frame(response)
+
             # Log truncated response
-            log_response = response_json[:500] + "..." if len(response_json) > 500 else response_json
+            log_response = payload[:500].decode("utf-8", "replace") + ("..." if len(payload) > 500 else "")
             print(f"[MCP] Response: {log_response}")
-            
+
             # Send response
             try:
-                client.sendall(response_json.encode('utf-8'))
+                client.sendall(payload)
             except Exception as send_err:
                 print(f"[MCP] Failed to send response: {send_err}")
-                
+
         except Exception as e:
             print(f"[MCP] Error processing command: {e}")
             traceback.print_exc()
             try:
-                error_response = {"status": "error", "message": str(e)}
-                client.sendall(json.dumps(error_response).encode('utf-8'))
+                client.sendall(protocol.frame({"status": "error", "message": str(e)}))
             except:
                 pass
     
@@ -191,7 +206,7 @@ class MCPExtension(omni.ext.IExt):
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.socket.bind((self.host, self.port))
-            self.socket.listen(1)
+            self.socket.listen(8)
             
             self.server_thread = threading.Thread(target=self._server_loop, daemon=True)
             self.server_thread.start()
@@ -267,22 +282,12 @@ class MCPExtension(omni.ext.IExt):
                         break
                     
                     buffer += data
-                    
-                    try:
-                        command = json.loads(buffer.decode('utf-8'))
-                        buffer = b''
-                        
-                        # Queue the command for processing in the main thread
+                    command, buffer = protocol.parse_buffer(buffer)
+                    if command is not None:
+                        # Queue the command for processing in the main thread; _process_command sends the response.
                         self._command_queue.put((client, command))
-                        
-                        # Wait for response (the update loop will process it)
-                        # We don't need to do anything here - response is sent by _process_command
-                        
-                    except json.JSONDecodeError:
-                        # Incomplete data, wait for more
-                        if len(buffer) > 1024 * 1024:  # 1MB limit
-                            print("[MCP] Buffer overflow, clearing")
-                            buffer = b''
+                    elif not buffer and data:
+                        print("[MCP] Buffer overflow, cleared")
                             
                 except socket.timeout:
                     # Check if still running
@@ -353,95 +358,71 @@ class MCPExtension(omni.ext.IExt):
             return {"status": "error", "message": f"Unknown command type: {cmd_type}"}
 
     def execute_script(self, code: str):
-        """Execute a Python script within the Isaac Sim context."""
-        import io
-        import sys
-        
-        def make_json_safe(obj):
-            """Convert object to JSON-serializable format."""
-            if obj is None:
+        """Execute a Python script within the Isaac Sim context.
+
+        stdout/stderr are captured per execution (bounded, UTF-8 kept as is); a `result` name the script assigns
+        comes back JSON-encoded (repr fallback, bounded). In external-driver mode the namespace offers `update()`
+        to advance one Kit frame (renders, physics steps); in the default update-event mode it is refused, since
+        the script already runs inside an update.
+        """
+        import contextlib
+
+        stdout, stderr = protocol.BoundedWriter(), protocol.BoundedWriter()
+        local_ns = {
+            "omni": omni,
+            "carb": carb,
+            "Usd": Usd,
+            "UsdGeom": UsdGeom,
+            "Sdf": Sdf,
+            "Gf": Gf,
+        }
+
+        def safe_get_prim(path):
+            stage = omni.usd.get_context().get_stage()
+            if not stage:
                 return None
-            if isinstance(obj, (str, int, float, bool)):
-                return obj
-            if isinstance(obj, (list, tuple)):
-                return [make_json_safe(item) for item in obj]
-            if isinstance(obj, dict):
-                return {str(k): make_json_safe(v) for k, v in obj.items()}
-            return str(obj)
-        
-        def make_ascii_safe(text):
-            """Convert text to ASCII-safe string."""
-            if not isinstance(text, str):
-                return str(text)
-            replacements = {
-                '\u2713': '[OK]', '\u2714': '[OK]',
-                '\u2717': '[X]', '\u2718': '[X]',
-                '\u2192': '->', '\u2190': '<-',
-                '\u2022': '*', '\u25cf': '*',
-            }
-            for unicode_char, ascii_char in replacements.items():
-                text = text.replace(unicode_char, ascii_char)
-            return text.encode('ascii', errors='replace').decode('ascii')
-        
-        old_stdout = None
+            prim = stage.GetPrimAtPath(path)
+            return prim if prim and prim.IsValid() else None
+
+        def safe_traverse(root_path):
+            stage = omni.usd.get_context().get_stage()
+            if not stage:
+                return
+            root = stage.GetPrimAtPath(root_path)
+            if not root or not root.IsValid():
+                return
+            for prim in Usd.PrimRange(root):
+                if prim.IsValid():
+                    yield prim
+
+        def update():
+            if not self._external_driver:
+                raise RuntimeError("update() is only available when the command queue is driven externally; "
+                                   "this script already runs inside Kit's update")
+            omni.kit.app.get_app().update()
+
+        local_ns["safe_get_prim"] = safe_get_prim
+        local_ns["safe_traverse"] = safe_traverse
+        local_ns["update"] = update
         try:
-            old_stdout = sys.stdout
-            sys.stdout = captured_output = io.StringIO()
-            
-            local_ns = {
-                "omni": omni,
-                "carb": carb,
-                "Usd": Usd,
-                "UsdGeom": UsdGeom,
-                "Sdf": Sdf,
-                "Gf": Gf,
-            }
-            
-            def safe_get_prim(path):
-                stage = omni.usd.get_context().get_stage()
-                if not stage:
-                    return None
-                prim = stage.GetPrimAtPath(path)
-                return prim if prim and prim.IsValid() else None
-            
-            def safe_traverse(root_path):
-                stage = omni.usd.get_context().get_stage()
-                if not stage:
-                    return
-                root = stage.GetPrimAtPath(root_path)
-                if not root or not root.IsValid():
-                    return
-                for prim in Usd.PrimRange(root):
-                    if prim.IsValid():
-                        yield prim
-            
-            local_ns["safe_get_prim"] = safe_get_prim
-            local_ns["safe_traverse"] = safe_traverse
-            
-            exec(code, local_ns)
-            
-            output = make_ascii_safe(captured_output.getvalue())
-            sys.stdout = old_stdout
-            
-            result = local_ns.get("result", None)
-            result = make_json_safe(result)
-            
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exec(code, local_ns)
             return {
                 "status": "success",
                 "message": "Script executed successfully",
-                "result": result,
-                "output": output
+                "result": protocol.json_safe(local_ns.get("result", None)),
+                "output": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
             }
         except Exception as e:
-            if old_stdout is not None:
-                sys.stdout = old_stdout
-            error_msg = make_ascii_safe(str(e))
+            error_msg = str(e)[:4000]
             carb.log_error(f"[MCP] Script error: {error_msg}")
-            tb = make_ascii_safe(traceback.format_exc())
             return {
                 "status": "error",
                 "message": error_msg,
-                "traceback": tb
+                "traceback": traceback.format_exc()[-4000:],
+                "output": stdout.getvalue(),
+                "stderr": stderr.getvalue(),
             }
         
     def get_scene_info(self):
